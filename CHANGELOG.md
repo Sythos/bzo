@@ -6,6 +6,32 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.40] - 2026-10-10
+
+### Added
+- Everything on one port, 5154 by default, TCP and UDP. Browsers carry moves
+  and shots over WebTransport (`"webtransport": true`), else WebRTC
+  (`"webrtc": {}`), with the voice TURN relays as the last resort and the
+  WebSocket until one opens -- iOS Safari, Firefox, Chrome and the Quest
+  included. BZFlag clients share the same UDP.
+- HTTPS on the port speaks HTTP/2, so a page's requests share one connection.
+- `/playerlist`, the scoreboard's `T` column and `/api/players` say which
+  path a player is on: `h3+`, `rtc+`, `turn+` (`h`, `r`, `t`), and a BZFlag
+  client's `udp+` (`b+`).
+- `/test.html` links the `?udp=h3|rtc|turn|ws` test modes and
+  `/wt-test.html`; the log notes a main thread that stops answering.
+
+### Changed
+- The default port is 5154, BZFlag's IANA port.
+- WebRTC no longer needs a port of its own: `webrtc.listen` and 5153 are
+  gone, and node-datachannel with them; an old `listen` is ignored with a log
+  line.
+
+### Fixed
+- A BZFlag client on the server's own network gets its UDP link through the
+  router's loop-back.
+- The scoreboard's names and 1-on-1 column show in Firefox.
+
 ## [1.3.39] - 2026-10-10
 
 ### Fixed
