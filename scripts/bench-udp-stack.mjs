@@ -5,8 +5,8 @@
  * See LICENSE or https://www.gnu.org/licenses/agpl-3.0.html
  */
 // What the server's half of a browser's UDP path costs on each stack (#189):
-// libdatachannel on its own port, as server/udp-channel.cjs runs it; werift
-// with a socket per peer; werift on one shared socket; WebTransport datagrams
+// bzo's own server/udp-channel.cjs (werift on a shared socket, as the BZFlag
+// port runs it); werift with a socket per peer; werift on one shared socket; WebTransport datagrams
 // (HTTP/3, @fails-components/webtransport) on that same socket; and both at
 // once, half the tanks on each. The shared socket sorts every datagram by its
 // first byte (RFC 9443) -- STUN, DTLS, QUIC, BZFlag -- which is what serving
@@ -18,8 +18,7 @@
 // The server is a child process, so its CPU (utime+stime, every thread, from
 // /proc) is its own. It relays each move to every peer, gathered once per
 // turn of the event loop and split to fit a packet, as bzo's
-// `flushChannelMoves` does. The tanks are node-datachannel peers in this
-// process, opened through public/udp-channel.mjs, the browser's own code;
+// `flushChannelMoves` does. The tanks are werift peers in this process, opened through public/udp-channel.mjs, the browser's own code;
 // WebTransport tanks are the library's Node client, trusting a throwaway
 // certificate by its hash as a browser's `serverCertificateHashes` does.
 // Latency is send to receive on this process's clock.
@@ -37,7 +36,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, arg, i, all
   return pairs;
 }, []));
 
-const STACKS = ['ndc', 'werift-own', 'werift-shared', 'wt-shared', 'mixed'];
+const STACKS = ['bzo', 'werift-own', 'werift-shared', 'wt-shared', 'mixed'];
 const PORT = Number(args.port || 5160);
 const RATE = Number(args.rate || 30);
 const SECONDS = Number(args.seconds || 20);
@@ -77,7 +76,7 @@ async function runServer(stack) {
   }
 
   if (stack === 'wt-shared' || stack === 'mixed') await wtStack(peers, onMove);
-  const open = stack === 'ndc' ? await ndcStack() : await weriftStack(stack !== 'werift-own');
+  const open = stack === 'bzo' ? await bzoStack() : await weriftStack(stack !== 'werift-own');
 
   process.on('message', (message) => {
     if (message.type === 'open') {
@@ -95,10 +94,20 @@ async function runServer(stack) {
   process.send({ type: 'ready' });
 }
 
-// libdatachannel, through bzo's own server/udp-channel.cjs.
-async function ndcStack() {
+// bzo's own server/udp-channel.cjs, on a socket sorted as the BZFlag port's.
+async function bzoStack() {
   const { createUdpChannels } = require('../server/udp-channel.cjs');
-  const channels = createUdpChannels({ listen: `127.0.0.1:${PORT}` });
+  const { classifyDatagram } = require('../server/bzflag-server.cjs');
+  const dgram = require('node:dgram');
+  const shared = dgram.createSocket('udp4');
+  await new Promise((resolve) => shared.bind(PORT, '127.0.0.1', resolve));
+  const routes = {};
+  shared.on('message', (datagram, from) => routes[classifyDatagram(datagram)]?.(datagram, from));
+  const channels = await createUdpChannels({
+    socket: shared,
+    routeUdp: (kind, handler) => { routes[kind] = handler; },
+    port: PORT,
+  });
   return ({ sendSignal, onMessage }) => {
     const session = channels.open({ name: 'bench', sendSignal, onMessage });
     return { send: (text) => session.send(text), signal: (signal) => session.signal(signal) };
@@ -350,7 +359,7 @@ function cpuTicks(pid) {
 }
 
 async function runOnce(stack, tanks) {
-  const { RTCPeerConnection } = await import('node-datachannel/polyfill');
+  const { RTCPeerConnection } = require('werift');
   const { createUdpChannel } = await import('../public/udp-channel.mjs');
   const certificate = makeCertificate();
   const child = fork(fileURLToPath(import.meta.url), ['--role', 'server', '--stack', stack, '--port', String(PORT),

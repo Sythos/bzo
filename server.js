@@ -15,7 +15,8 @@ const logPath = process.env.SERVER_LOG_PATH
 // Clear server.log on restart
 require('fs').writeFileSync(logPath, '');
 const http = require('http');
-const https = require('https');
+const http2 = require('http2');
+const { bridgeHttp2 } = require('./server/http2-bridge.cjs');
 const { URLSearchParams } = require('url');
 const { WebSocketServer } = require('ws');
 const {
@@ -300,6 +301,7 @@ const {
 const { createServerStats, formatServerStats } = require('./server/server-stats.cjs');
 const { createUpnpMapping, nameForAddress } = require('./server/upnp.cjs');
 const { createUdpChannels } = require('./server/udp-channel.cjs');
+const { createWebTransport } = require('./server/webtransport.cjs');
 const serverStats = createServerStats();
 const {
   COMMAND_TIER,
@@ -397,6 +399,10 @@ function formatLogArgs(args) {
   };
   return redactInstallPath(args.map(render).join(' '));
 }
+
+// A main thread that stops coming back to the event loop says so in the log
+// (server/loop-watchdog.cjs), from a worker that keeps running when it does.
+require('./server/loop-watchdog.cjs').startLoopWatchdog({ logPath, log: (...args) => log(...args) });
 
 function log(...args) {
   const now = new Date();
@@ -1312,6 +1318,9 @@ app.get('/api/players', (req, res) => {
         losses: player.losses,
         paused: player.paused,
         flag: flag ? { type: flag.type, zoned: flag.zoned === true } : null,
+        // The scoreboard's `T` column: client type, then UDP (`playerLink`).
+        clientType: playerClientType(player),
+        link: playerLink(player),
       };
     }),
   });
@@ -1375,9 +1384,11 @@ app.get('/api/voice-ice', (req, res) => {
 // own clock. Short lines only, and only from that page's shape of request.
 app.post('/api/webrtc-test-log', (req, res) => {
   const lines = Array.isArray(req.body?.lines) ? req.body.lines.slice(0, 50) : [];
+  // public/wt-test.html logs the same way, under its own tag.
+  const tag = req.body?.page === 'wt-test' ? 'wt-test' : 'webrtc-test';
   const ip = (req.get('x-forwarded-for') || '').split(',')[0].trim() || req.socket.remoteAddress;
   lines.forEach((line) => {
-    if (typeof line === 'string') log(`[webrtc-test] ${ip} ${line.slice(0, 200).replace(/[\r\n]/g, ' ')}`);
+    if (typeof line === 'string') log(`[${tag}] ${ip} ${line.slice(0, 200).replace(/[\r\n]/g, ' ')}`);
   });
   res.status(204).end();
 });
@@ -3200,14 +3211,19 @@ wss.on('error', (err) => {
 
 // `https: { cert, key }`, PEM files beside server.json or absolute: the same
 // app over TLS, answered on the BZFlag port alongside BZFlag and plain HTTP
-// (docs/port-mux-plan.md). A headset will not run WebXR without it. Its
-// WebSockets are the plain server's, handed to the same handler.
+// (docs/port-mux-plan.md). A headset will not run WebXR without it. HTTP/2
+// where the browser offers it, so a page's many requests share one
+// connection, and HTTP/1.1 otherwise -- which is also how a WebSocket comes,
+// handed to the plain server's handler. Express runs on HTTP/2 through
+// server/http2-bridge.cjs.
 function loadHttpsServer() {
   const config = serverConfig.https;
   if (!config || typeof config !== 'object') return null;
   const read = (file) => fs.readFileSync(path.resolve(path.dirname(CONFIG_PATH), String(file)));
   try {
-    const tlsServer = https.createServer({ cert: read(config.cert), key: read(config.key) }, app);
+    const tlsServer = http2.createSecureServer({
+      cert: read(config.cert), key: read(config.key), allowHTTP1: true,
+    }, bridgeHttp2(app));
     // A PROXY header renamed the socket underneath (proxy-protocol.cjs); the
     // TLS socket over it asks the kernel instead, so it is told.
     tlsServer.on('secureConnection', (tlsSocket) => {
@@ -5734,20 +5750,22 @@ const VOICE_ICE_SERVERS_IPV4 = parseVoiceIceServers(
   process.env.VOICE_ICE_SERVERS_IPV4 ?? serverConfig.voiceIceServersIpv4
 );
 
-// `webrtc.listen` (#8): the UDP channel, a data channel on one IPv4 UDP port
-// (server/udp-channel.cjs). Its STUN servers learn the public address to
-// offer: `webrtc.iceServers`, or the STUN half of the IPv4 voice servers.
+// `webrtc` (#8, #189): the UDP channel, a WebRTC data channel on the BZFlag
+// port (server/udp-channel.cjs, `startUdpChannels`). Its STUN servers learn
+// the public address to offer: `webrtc.iceServers`, or the STUN half of the
+// IPv4 voice servers.
 const UDP_CHANNEL_STUN = Array.isArray(serverConfig.webrtc?.iceServers)
   ? serverConfig.webrtc.iceServers.filter((url) => typeof url === 'string')
   : VOICE_ICE_SERVERS_IPV4.flatMap((server) => server.urls).filter((url) => /^stun:/i.test(url));
-const UDP_CHANNELS = serverConfig.webrtc?.listen
-  ? createUdpChannels({ listen: serverConfig.webrtc.listen, iceServers: UDP_CHANNEL_STUN, log })
-  : null;
+const WEBRTC_ON = Boolean(serverConfig.webrtc && typeof serverConfig.webrtc === 'object');
+let UDP_CHANNELS = null;
 // A channel loses a move now and then, as UDP loses a MsgPlayerUpdate, and a
 // lost stop would leave a tank coasting on every screen until its next
 // update. Upstream's answer is an update at least once a second
 // (`MaxUpdateTime`, Player.cxx:38), so a resting tank is corrected within one.
-if (UDP_CHANNELS) GAME_CONFIG.MAX_UPDATE_INTERVAL = Math.min(GAME_CONFIG.MAX_UPDATE_INTERVAL, 1000);
+if (WEBRTC_ON || serverConfig.webtransport === true) {
+  GAME_CONFIG.MAX_UPDATE_INTERVAL = Math.min(GAME_CONFIG.MAX_UPDATE_INTERVAL, 1000);
+}
 
 function voiceRtcConfigFor(playerId) {
   if (!VOICE_TURN_SECRET) {
@@ -7440,10 +7458,8 @@ class Player {
       notResponding: this.notResponding,
       autopilot: this.autopilot,
       bot: this.bot,
-      clientType: clientTypeOf({
-        serverBot: bots.has(this.id), bot: this.bot, native: this.native,
-        xr: this.xr, headset: this.headset, mobile: this.mobile,
-      }),
+      clientType: playerClientType(this),
+      link: playerLink(this),
       forwardSpeed: this.forwardSpeed,
       rotationSpeed: this.rotationSpeed,
       verticalVelocity: this.verticalVelocity,
@@ -8812,10 +8828,13 @@ defineCommand('/playerlist', COMMAND_TIER.OPEN,
       // A BZFlag client's link as upstream's `/playerlist` says it
       // (`getPlayerHostInfo`): ` udp` once heard from on UDP, `+` once sent to.
       // A browser's UDP channel (#8) counts as its UDP, and says so the same way.
+      // A browser's names which: ` h3` for WebTransport, ` rtc` for WebRTC,
+      // ` turn` for WebRTC through a relay.
       const link = other.nativeLink;
       const udpIn = link ? link.udpIn() : Boolean(other.udpChannel && other.udpChannelHeard);
       const udpOut = link ? link.udpOut() : Boolean(other.udpChannel?.isOpen());
-      const udp = `${udpIn ? ' udp' : ''}${udpOut ? '+' : ''}`;
+      const udpName = link ? 'udp' : (other.udpChannel?.kind || 'udp');
+      const udp = `${udpIn ? ` ${udpName}` : ''}${udpOut ? '+' : ''}`;
       const address = other.clientIP || (other.claimedIP ? `${other.claimedIP} (unverified)` : 'unknown');
       replyToPlayer(player, `#${other.id} ${other.name} [${other.team}] ${address}${udp}`
         + (marks.length ? ` (${marks.join(', ')})` : ''));
@@ -11139,9 +11158,10 @@ function broadcastAll(message) {
 const UDP_CHANNEL_UP_TYPES = new Set(['m', 'shoot']);
 const UDP_CHANNEL_DOWN_TYPES = new Set(['shotBegin', 'shotEnd', 'gmUpdate']);
 // The most a channel message carries: one packet, since a message split
-// across packets is lost if any piece is. Anything larger -- a laser's
+// across packets is lost if any piece is, and under the 1024 bytes Chrome
+// takes in a WebTransport datagram. Anything larger -- a laser's
 // many-segment shotBegin -- takes the WebSocket.
-const UDP_CHANNEL_CHUNK_BYTES = 1100;
+const UDP_CHANNEL_CHUNK_BYTES = 1000;
 
 // --- Flags -------------------------------------------------------------
 //
@@ -11877,8 +11897,74 @@ if (BZFLAG_CONFIG) {
     .then(() => {
       onHttpListening();
       if (BZFLAG_CONFIG.upnp === true) startBzflagUpnp(PORT);
+      if (serverConfig.webtransport === true) startWebTransport();
+      if (WEBRTC_ON) startUdpChannels();
     })
     .catch((error) => logError(`[BZFLAG] listen on ${describeListenTarget(LISTEN_HOST, PORT)} failed: ${error.message}`));
+}
+
+// `"webtransport": true`: HTTP/3 on the BZFlag port's UDP, with the `https`
+// certificate, which has to name the host a browser asks for -- QUIC does not
+// pass through the reverse proxy (server/webtransport.cjs, #189).
+let webTransport = null;
+function startWebTransport() {
+  const config = serverConfig.https;
+  if (!config || typeof config !== 'object') {
+    log('[WT] webtransport needs https; off');
+    return;
+  }
+  const read = (file) => fs.readFileSync(path.resolve(path.dirname(CONFIG_PATH), String(file)), 'utf8');
+  let cert;
+  let key;
+  try {
+    cert = read(config.cert);
+    key = read(config.key);
+  } catch (error) {
+    log(`[WT] off: ${error.message}`);
+    return;
+  }
+  createWebTransport({
+    socket: bzflagServer.udpSocket(),
+    routeQuic: (handler) => bzflagServer.routeUdp('quic', handler),
+    cert,
+    key,
+    claim: claimWebTransport,
+    log,
+  })
+    .then((created) => { webTransport = created; })
+    .catch((error) => logError(`[WT] off: ${error.message}`));
+}
+
+// `webrtc`: the UDP channel's WebRTC on the BZFlag port's socket, over werift
+// (server/udp-channel.cjs). A connection from before it is up gets no data
+// channel until its next `init`. `listen` once named a port of its own; any
+// other value than `bzflag` is set aside, and said so.
+function startUdpChannels() {
+  const listen = serverConfig.webrtc.listen;
+  if (listen !== undefined && listen !== 'bzflag') {
+    log(`[RTC] webrtc.listen "${listen}" ignored: the UDP channel is on the BZFlag port`);
+  }
+  // The relays' own addresses, so a channel that came through one says so.
+  const relayAddresses = new Set();
+  const relayHosts = new Set([...VOICE_ICE_SERVERS, ...VOICE_ICE_SERVERS_IPV4]
+    .flatMap((server) => server.urls)
+    .map((url) => /^turns?:\[?([^\]?/]+?)\]?(?::\d+)?(?:\?|$)/i.exec(url)?.[1])
+    .filter(Boolean));
+  for (const host of relayHosts) {
+    require('dns').promises.lookup(host, { all: true })
+      .then((records) => records.forEach((record) => relayAddresses.add(record.address)))
+      .catch(() => {});
+  }
+  createUdpChannels({
+    isRelay: (address) => relayAddresses.has(address),
+    socket: bzflagServer.udpSocket(),
+    routeUdp: (kind, handler) => bzflagServer.routeUdp(kind, handler),
+    port: PORT,
+    iceServers: UDP_CHANNEL_STUN,
+    log,
+  })
+    .then((channels) => { UDP_CHANNELS = channels; })
+    .catch((error) => logError(`[RTC] werift off: ${error.message}`));
 }
 
 // `bzflag.upnp`, bzfs's `-UPnP`: the gateway forwards `publicAddr`'s port
@@ -15146,25 +15232,110 @@ function openUdpChannel(player, ws) {
         if (player.joined) log(`[RTC] "${player.name}" closed`);
       }
     },
-    onMessage: (text) => {
-      serverStats.countIn(text.length);
-      let message;
-      try {
-        message = JSON.parse(text);
-      } catch {
-        return;
-      }
-      if (!message || !UDP_CHANNEL_UP_TYPES.has(message.type)) return;
-      if (player.udpChannel === session) player.udpChannelHeard = true;
-      const ct = Number(message.ct);
-      if (message.type === 'm' && Number.isFinite(ct)) {
-        if (Number.isFinite(player.udpChannelLastCt) && ct <= player.udpChannelLastCt) return;
-        player.udpChannelLastCt = ct;
-      }
-      ws.emit('message', message);
-    },
+    onMessage: (text) => udpChannelMessage(player, session, ws, text),
   });
   return session;
+}
+
+// What a player's UDP channel brought in, over WebRTC or WebTransport.
+function udpChannelMessage(player, channel, ws, text) {
+  serverStats.countIn(text.length);
+  let message;
+  try {
+    message = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (!message || !UDP_CHANNEL_UP_TYPES.has(message.type)) return;
+  if (player.udpChannel === channel) player.udpChannelHeard = true;
+  const ct = Number(message.ct);
+  if (message.type === 'm' && Number.isFinite(ct)) {
+    if (Number.isFinite(player.udpChannelLastCt) && ct <= player.udpChannelLastCt) return;
+    player.udpChannelLastCt = ct;
+  }
+  ws.emit('message', message);
+}
+
+// The UDP channel's TURN relays (#189): the IPv4 voice relays'
+// `turn:...?transport=udp`, with this player's own credential. Not TCP or
+// TLS: a relay over TCP holds back every message behind a lost one, which is
+// what the WebSocket already does.
+function udpChannelIceServers(playerId) {
+  const config = voiceRtcConfigFor(playerId);
+  return (config.ipv4IceServers || config.iceServers)
+    .map((server) => ({ ...server, urls: server.urls.filter((url) => /^turn:/i.test(url) && /transport=udp/i.test(url)) }))
+    .filter((server) => server.urls.length > 0 && server.username !== undefined);
+}
+
+// The scoreboard's `T` letter (server/client-type.cjs).
+function playerClientType(player) {
+  return clientTypeOf({
+    serverBot: bots.has(player.id), bot: player.bot, native: player.native,
+    xr: player.xr, headset: player.headset, mobile: player.mobile,
+  });
+}
+
+// The scoreboard's word on a player's UDP, after its `T` letter: a BZFlag
+// client's `u` once heard from on UDP and `+` once sent to there too, as
+// `/playerlist`'s ` udp` and ` udp+`; a browser's `h` (WebTransport), `r`
+// (WebRTC) or `t` (WebRTC through a TURN relay) once its channel is open,
+// with `+` once heard on it.
+function playerLink(player) {
+  const native = player.nativeLink;
+  if (native) {
+    if (!native.udpIn()) return '';
+    return native.udpOut() ? '+' : 'u';
+  }
+  const channel = player.udpChannel;
+  if (!channel?.isOpen()) return '';
+  const letter = { h3: 'h', turn: 't' }[channel.kind] || 'r';
+  return player.udpChannelHeard ? `${letter}+` : letter;
+}
+
+// A change of link goes out as the player's record, checked each second
+// rather than at every place a channel opens, closes or is first heard.
+setInterval(() => {
+  players.forEach((player) => {
+    if (!player.joined) return;
+    const link = playerLink(player);
+    if (link === (player.lastLink ?? '')) return;
+    player.lastLink = link;
+    broadcastPlayerRecord('playerUpdated', player);
+  });
+}, 1000).unref?.();
+
+// WebTransport's half (`startWebTransport`): each connection gets a token in
+// its `init`, good while its WebSocket is open; a session that presents it
+// becomes the player's UDP channel, in place of any WebRTC one.
+const webTransportTokens = new Map();
+function webTransportOffer(player) {
+  if (!webTransport) return undefined;
+  if (!player.webTransportToken) {
+    player.webTransportToken = crypto.randomBytes(18).toString('base64url');
+    webTransportTokens.set(player.webTransportToken, player);
+  }
+  const port = Number(/:(\d+)$/.exec(bzflagPublicAddr || '')?.[1]) || PORT;
+  return { port, token: player.webTransportToken };
+}
+function claimWebTransport(token) {
+  const player = webTransportTokens.get(token);
+  if (!player || player.ws.readyState !== 1) return null;
+  let channel = null;
+  return {
+    attach(created) {
+      channel = created;
+      if (player.udpChannel !== channel) player.udpChannel?.close();
+      player.udpChannel = channel;
+      player.udpChannelHeard = false;
+      log(`[WT] ${player.joined ? `"${player.name}"` : `#${player.id}`}`);
+    },
+    onMessage: (text) => udpChannelMessage(player, channel, player.ws, text),
+    onClose() {
+      if (player.udpChannel !== channel) return;
+      player.udpChannel = null;
+      if (player.joined) log(`[WT] "${player.name}" closed`);
+    },
+  };
 }
 
 // A move to every BZFlag client the moment it is accepted, as bzfs relays a
@@ -15332,6 +15503,7 @@ function sayServerIsGoing(reason) {
   serverGoingSaid = true;
   broadcastAll({ type: 'message', src: SERVER_PLAYER, dst: ALL_PLAYERS, msgType: 'server', text: `Server ${reason}`, ts: Date.now() });
   broadcastAll({ type: 'superKill' });
+  webTransport?.close();
   bzflagServer?.close();
 }
 
@@ -17620,6 +17792,9 @@ function acceptConnection(ws, req) {
     // Whether to offer a data channel for moves ('rtc'); a proxied game has
     // none, since its moves go on to a bzfs over its own UDP.
     udpChannel: Boolean(UDP_CHANNELS),
+    udpChannelIceServers: UDP_CHANNELS ? udpChannelIceServers(player.id) : undefined,
+    // WebTransport to the BZFlag port, tried before the data channel.
+    webTransport: webTransportOffer(player),
     flags: getFlagStates(),
     worldTime: currentWorldTime(),
     title: serverConfig.title || '',
@@ -19082,6 +19257,7 @@ function acceptConnection(ws, req) {
   // Handle disconnect
   ws.on('close', () => {
     player.udpChannel?.close();
+    webTransportTokens.delete(player.webTransportToken);
     const playerName = player.name;
     const playerNum = player.playerNumber;
     const playerWins = player.wins

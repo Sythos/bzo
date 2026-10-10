@@ -98,13 +98,10 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",
-    "@fails-components/webtransport": "^1.6.9",
-    "@fails-components/webtransport-transport-http3-quiche": "^1.6.9",
     "eslint": "^9.22.0",
     "husky": "^9.1.7",
     "lint-staged": "^15.2.10",
-    "nodemon": "^3.1.14",
-    "werift": "^0.25.0"
+    "nodemon": "^3.1.14"
   },
   "lint-staged": {
     "*.{js,cjs,mjs}": [
@@ -112,6 +109,8 @@
     ]
   },
   "optionalDependencies": {
-    "node-datachannel": "^0.33.4"
+    "werift": "^0.25.0",
+    "@fails-components/webtransport": "^1.6.9",
+    "@fails-components/webtransport-transport-http3-quiche": "^1.6.9"
   }
 }

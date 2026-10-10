@@ -959,8 +959,13 @@ body.scoreboard-collapsed #mainhud {
   white-space: nowrap;
 }
 
+/* The panel is as wide as its content, and Firefox counts a cell with
+   `min-width: 0` and hidden overflow as no width at all when it sizes it, so
+   the names went with nothing to show. A floor keeps them; a longer name still
+   shrinks to its ellipsis. */
 .scoreboardCell-player {
   flex: 1 1 auto;
+  min-width: 8ch;
 }
 
 /* Every cell but the first stands off the one before it, so a right-aligned

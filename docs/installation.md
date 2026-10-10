@@ -171,24 +171,39 @@ See [example-server.json](../example-server.json) for the supported shape.
 
 ### Ports
 
-`listen` is the game's one TCP port: the web app, its WebSockets, and HTTPS
-when `https` is set. With a `bzflag` block it is a BZFlag port as well, TCP
-and UDP. The UDP channel, over WebRTC, takes a second UDP port until #189
-merges them:
+`listen` is the game's one port, and the only one to forward, TCP and UDP:
+
+- **TCP:** the web app over HTTP, or HTTPS when `https` is set (HTTP/2
+  where the browser offers it, HTTP/1.1 otherwise), its WebSockets, and
+  BZFlag clients with a `bzflag` block -- told apart by their opening bytes.
+- **UDP**, with a `bzflag` block: BZFlag's ping and movement link,
+  WebTransport (`"webtransport": true`) and WebRTC (`"webrtc": {}`), told
+  apart by each datagram's first bytes.
 
 ```json
-"listen": "[::]:5154",
-"webrtc": { "listen": "0.0.0.0:5153" }
+"listen": "[::]:5154"
 ```
 
 An address and port is written `host:port`, with an IPv6 address in
 brackets: `[::]:5154`. `:::5154`, as `ss` prints it, means the same, and a
 bare `5154` is every interface. `::` is every interface in both families: an
 IPv4 peer arrives on it as itself, so IPv4 BZFlag clients still connect.
-`webrtc.listen` has to be IPv4 (`0.0.0.0`): some carriers drop a phone's
-data connection when WebRTC runs over its IPv6. The `LISTEN` and `PORT`
-environment variables override `listen`. Without one the server listens on
-`[::]:5154`.
+The `LISTEN` and `PORT` environment variables override `listen`. Without one
+the server listens on `[::]:5154`.
+
+A player on the server's own network who uses its public name reaches it
+through the router's loop-back (NAT reflection): the router has to forward
+UDP that way as well as TCP, for every network it serves, a DMZ included.
+
+`"webtransport": true`, with `https` and a `bzflag` block, answers HTTP/3 on
+the BZFlag port's UDP, with the `https` certificate. Browsers reach it
+directly, not through a reverse proxy, so the certificate has to name the
+host they use. A browser with WebTransport carries its UDP channel over it,
+before WebRTC ([network.md](network.md)), and `/wt-test.html` tests a
+device's path to it ([port-mux-plan.md](port-mux-plan.md)). It needs the
+optional `@fails-components/webtransport` packages, which `npm install`
+brings, with a prebuilt native module that needs glibc 2.38 or later (Ubuntu
+24.04 and on); without them the log says so and HTTP/3 stays off.
 
 ### Voice
 
@@ -228,27 +243,42 @@ The TLS name has to be on the relay's certificate too.
 
 ### UDP channel
 
-Moves and shots can ride a WebRTC data channel instead of the WebSocket, as
-upstream sends them over UDP, so a lost packet costs one message rather than
-holding back every one behind it:
+Moves and shots can ride UDP instead of the WebSocket, as upstream sends
+them, so a lost packet costs one message rather than holding back every one
+behind it. A browser tries WebTransport first (`"webtransport": true`,
+above), then a WebRTC data channel:
 
 ```json
-"webrtc": { "listen": "0.0.0.0:5153" }
+"webrtc": {}
 ```
 
-Every player shares that one UDP port, IPv4 only. Forward it like the game
-port; no certificate is needed, and the reverse proxy is not involved. The
-server learns its public address from the `stun:` entries of
-`voiceIceServersIpv4`, or from `"iceServers": ["stun:host:3478"]` in the
-block. A player whose channel does not open plays on the WebSocket as before,
-and `/playerlist` shows ` udp+` for one whose channel did. Under Docker,
-publish `5153:5153/udp`. [network.md](network.md) has the details.
+Both share the BZFlag port's UDP, so a `bzflag` block is needed, and nothing
+more is forwarded than that port. WebRTC is IPv4 only: some carriers drop a
+phone's data connection when WebRTC runs over its IPv6. No certificate is
+needed, and the reverse proxy is not involved. The server learns its public
+address from the `stun:` entries of `voiceIceServersIpv4`, or from
+`"iceServers": ["stun:host:3478"]` in the block. It runs on werift, an
+optional package. A player whose channel does not open plays on the
+WebSocket as before, and `/playerlist` shows `h3+`, `rtc+` or `turn+` for
+one whose channel did. [network.md](network.md) has the details.
+
+With `voiceTurnSecret`, each player also gets the IPv4 voice relays'
+`turn:...?transport=udp` for the channel, with its own credential: WebRTC
+takes the relay only when no direct path works. `?udp=rtc`, `?udp=turn` (the
+relay alone), `?udp=h3` or `?udp=ws` on the game's URL holds one browser to
+one path, for testing.
 
 ## Behind a reverse proxy
 
 Terminate TLS at the proxy and serve the game over `https://`; the client uses
 `wss://` for its WebSocket whenever the page is HTTPS. WebXR needs a secure
 context, so this is not optional for headsets.
+
+A reverse proxy carries TCP only, and speaks HTTP/1.1 to bzo: players get
+HTTP/2 as far as the proxy, and WebTransport not at all. The UDP of the
+BZFlag port -- BZFlag, WebTransport, WebRTC -- has to reach it directly, so
+forward that port's UDP past the proxy. A TCP proxy with PROXY headers
+(below) leaves TLS and HTTP/2 to bzo instead.
 
 Apache's `mod_proxy` sends `X-Forwarded-For`, `X-Forwarded-Host` and
 `X-Forwarded-Server` on its own, but **not** `X-Forwarded-Proto` or
@@ -276,8 +306,9 @@ name each client with a PROXY header, v1 or v2 (HAProxy's `send-proxy` or
 ```
 
 From those addresses or CIDR blocks a header is read and the connection is
-the client's from then on -- web app, HTTPS, BZFlag, and the BZFlag UDP link
-that has to come from the same address. A connection from one without a
+the client's from then on -- web app, HTTPS, BZFlag, and the BZFlag UDP link,
+which has to come from that client's address or, through the router's
+loop-back, from the proxy's own. A connection from one without a
 header stays the proxy's own. A header from anyone else is refused and
 logged. Anything else that reaches the port from a listed address, such as a
 router's NAT reflection, can name any client it likes.
@@ -358,7 +389,9 @@ WebXR without it:
 "https": { "cert": "fullchain.pem", "key": "privkey.pem" }
 ```
 
-[port-mux-plan.md](port-mux-plan.md) has how, and the UDP half still to do.
+It serves HTTP/2 where the browser offers it.
+[port-mux-plan.md](port-mux-plan.md) has how the port tells its traffic
+apart.
 
 ## Proxying BZFlag servers
 

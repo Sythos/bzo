@@ -62,9 +62,9 @@ game, `/` or `?` shows the keyboard's.
 
 The VR mode uses native WebXR and requires a browser and headset that support
 `immersive-vr`. For local validation, open the game at `http://localhost:5154`.
-For remote access, terminate TLS at the reverse proxy and open the game over
-`https://`; the client automatically uses `wss://` for its WebSocket connection
-when the page is served over HTTPS.
+For remote access, serve the game over `https://` -- with the server's own
+`https` certificate, or at a reverse proxy; the client automatically uses
+`wss://` for its WebSocket connection when the page is served over HTTPS.
 
 A headset browser launching the installed app tries to enter VR with no 2D
 landing page. `xr-launch.js` asks for the session before the rest of the client
@@ -88,10 +88,9 @@ headset, because Chrome on Android reports `immersive-vr` support on any phone
 through Cardboard; VR Mode stays in the Settings menu there.
 
 If the deployment sets a restrictive `Permissions-Policy` header, allow
-`xr-spatial-tracking=(self)`. The Node.js server does not terminate TLS itself,
-so HTTPS and the corresponding WebSocket proxy configuration are deployment
-responsibilities -- see
-[docs/installation.md](docs/installation.md#behind-a-reverse-proxy).
+`xr-spatial-tracking=(self)`. TLS is either the server's own (`https`, see
+[docs/installation.md](docs/installation.md#https)) or a reverse proxy's
+([docs/installation.md](docs/installation.md#behind-a-reverse-proxy)).
 
 Use the [WebXR validation checklist](docs/webxr-validation.md) when checking a
 new browser, headset, or deployment. WebGPU rendering is outside the scope of

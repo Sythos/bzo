@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const http = require('node:http');
 const net = require('node:net');
-const { classifyOpening, createBzflagServer } = require('../server/bzflag-server.cjs');
+const { classifyDatagram, classifyOpening, createBzflagServer } = require('../server/bzflag-server.cjs');
 const { parseProxyHeader } = require('../server/proxy-protocol.cjs');
 const of = (text) => classifyOpening(Buffer.from(text, 'latin1'));
 
@@ -103,6 +103,39 @@ for (const trusted of [true, false]) {
   assert.match(plain, /127\.0\.0\.1$/);
   await mux.close?.();
 }
+
+// What a datagram on the BZFlag port is (#189): BZFlag by its length and
+// code, STUN by its length and cookie, DTLS and QUIC by the first byte.
+const frame = (code, body = []) => {
+  const out = Buffer.alloc(4 + body.length);
+  out.writeUInt16BE(body.length, 0);
+  out.write(code, 2, 2, 'latin1');
+  Buffer.from(body).copy(out, 4);
+  return out;
+};
+const stun = (type, attributes = 0) => {
+  const out = Buffer.alloc(20 + attributes);
+  out.writeUInt16BE(type, 0);
+  out.writeUInt16BE(attributes, 2);
+  out.writeUInt32BE(0x2112a442, 4);
+  return out;
+};
+assert.equal(classifyDatagram(Buffer.from([0, 2, 4, 4, 0, 0])), 'bzflag', "upstream's ping request");
+assert.equal(classifyDatagram(frame('of', [3])), 'bzflag', 'MsgUDPLinkRequest');
+assert.equal(classifyDatagram(frame('pu', new Array(300).fill(0))), 'bzflag', 'a long update: first byte 1');
+assert.equal(classifyDatagram(Buffer.concat([frame('ps', [1, 2]), frame('sb', [3])])), 'bzflag', 'frames together');
+assert.equal(classifyDatagram(frame('zz', [1])), 'other', 'not a UDP code');
+assert.equal(classifyDatagram(Buffer.from([0, 9, 0x70, 0x75, 0])), 'other', 'longer than it is');
+assert.equal(classifyDatagram(stun(0x0001, 8)), 'stun', 'binding request');
+assert.equal(classifyDatagram(stun(0x0101)), 'stun', 'binding response');
+const badCookie = stun(0x0001);
+badCookie.writeUInt32BE(1, 4);
+assert.equal(classifyDatagram(badCookie), 'other', 'no cookie');
+assert.equal(classifyDatagram(Buffer.from([22, 0xfe, 0xfd, 0, 0])), 'dtls', 'a DTLS 1.2 handshake');
+assert.equal(classifyDatagram(Buffer.from([0x40, 1, 2, 3, 4])), 'quic', 'a short header');
+assert.equal(classifyDatagram(Buffer.from([0xc3, 0, 0, 0, 1])), 'quic', 'a long header');
+assert.equal(classifyDatagram(Buffer.from([0x90, 0, 0, 0])), 'other', 'RTP, which nothing here speaks');
+assert.equal(classifyDatagram(Buffer.from([0, 1])), 'other', 'too short to be anything');
 
 console.log('test-port-mux: ok');
 process.exit(0);

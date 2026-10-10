@@ -238,6 +238,25 @@
   </section>
 
   <section>
+    <h2><code>udp</code></h2>
+    <p>
+      Which path carries moves and shots. A browser tries WebTransport to the
+      BZFlag port first, then WebRTC, with the TURN relay as WebRTC's last
+      resort, and plays on the WebSocket until one opens. These hold it to one.
+      The scoreboard's <code>T</code> column shows which it got:
+      <code>h+</code>, <code>r+</code>, or nothing for the WebSocket.
+    </p>
+    <div class="modes">
+      <a class="mode default" href="/"><b>Best available</b><span>default</span></a>
+      <a class="mode" href="/?udp=h3"><b>WebTransport only</b><span>?udp=h3</span></a>
+      <a class="mode" href="/?udp=rtc"><b>WebRTC only</b><span>?udp=rtc</span></a>
+      <a class="mode" href="/?udp=turn"><b>WebRTC through TURN</b><span>?udp=turn</span></a>
+      <a class="mode" href="/?udp=ws"><b>WebSocket only</b><span>?udp=ws</span></a>
+      <a class="mode" href="/wt-test.html"><b>WebTransport test page</b><span>/wt-test.html</span></a>
+    </div>
+  </section>
+
+  <section>
     <h2><code>follow</code> &mdash; a link for watching</h2>
     <p>
       The one link here that is not a measurement. <code>?follow=leader</code>

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bzo WebTransport test</title>
+<!--
+  WebTransport (HTTP/3) to the BZFlag port's UDP, server/webtransport.cjs's
+  /wt-test echo (#189): how long it takes to open, datagrams at a player's
+  30 a second echoed straight back (round trip and loss), and one stream.
+  The page itself can come through the reverse proxy; WebTransport goes to
+  the BZFlag port directly, 5154 unless ?port= says otherwise.
+-->
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 16px; background: #0b0e12; color: #e6f1ff; font: 15px/1.45 system-ui, sans-serif; }
+  main { max-width: 44rem; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 0.5rem; }
+  p { margin: 0 0 0.75rem; color: #b9c7d6; }
+  .modes { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  button { font: inherit; padding: 10px 14px; border-radius: 8px; border: 1px solid #2c3a4a; background: #16202b; color: #e6f1ff; }
+  button:active { background: #213040; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #11161d; border: 1px solid #2c3a4a; border-radius: 8px; padding: 10px; font-size: 13px; min-height: 12rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>WebTransport test</h1>
+  <p>
+    Opens WebTransport to this server's BZFlag port, sends ten seconds of
+    datagrams at 30 a second, and times their echoes. The log goes to the
+    server too.
+  </p>
+  <div class="modes">
+    <button id="run">Run</button>
+  </div>
+  <pre id="log"></pre>
+</main>
+<script>
+  const logEl = document.getElementById('log');
+  const started = performance.now();
+  const stamp = () => ((performance.now() - started) / 1000).toFixed(1).padStart(6);
+  const unsent = [];
+  function log(text) {
+    const line = `${stamp()}s ${text}`;
+    logEl.textContent = `${line}\n` + logEl.textContent;
+    unsent.push(line);
+  }
+  setInterval(async () => {
+    if (unsent.length === 0) return;
+    const lines = unsent.slice(0, 50);
+    try {
+      const res = await fetch('/api/webrtc-test-log', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ page: 'wt-test', lines }),
+      });
+      if (res.ok) unsent.splice(0, lines.length);
+    } catch {}
+  }, 1000);
+
+  const port = Number(new URLSearchParams(location.search).get('port')) || 5154;
+  const url = `https://${location.hostname}:${port}/wt-test`;
+  log(navigator.userAgent);
+  log(`WebTransport ${typeof WebTransport === 'function' ? 'present' : 'missing'}; ${url}`);
+
+  const percentile = (sorted, p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))].toFixed(1) : '-');
+
+  async function run() {
+    if (typeof WebTransport !== 'function') {
+      log('no WebTransport in this browser');
+      return;
+    }
+    const openedAt = performance.now();
+    let transport;
+    try {
+      transport = new WebTransport(url);
+      // Safari's `ready` has been seen never to settle, so the wait has its
+      // own end; how the session closed, if it did, is logged either way.
+      transport.closed.then((info) => log(`session closed: ${JSON.stringify(info)}`),
+        (error) => log(`session closed with error: ${error.name || ''} ${error.message || error}`));
+      const outcome = await Promise.race([
+        transport.ready.then(() => 'open'),
+        new Promise((resolve) => { setTimeout(() => resolve('timeout'), 10000); }),
+      ]);
+      if (outcome !== 'open') {
+        log('open timed out after 10s: ready never settled');
+        try { transport.close(); } catch {}
+        return;
+      }
+    } catch (error) {
+      log(`open failed after ${(performance.now() - openedAt).toFixed(0)}ms: ${error.name || ''} ${error.message || error}`);
+      return;
+    }
+    log(`open in ${(performance.now() - openedAt).toFixed(0)}ms; max datagram ${transport.datagrams.maxDatagramSize ?? '?'} bytes`);
+    let closed = false;
+    transport.closed.then(() => log('closed'), (error) => log(`closed: ${error.message || error}`))
+      .finally(() => { closed = true; });
+
+    // Datagrams: sequence number and send time, padded to a move's size.
+    const sentAt = new Map();
+    const rtts = [];
+    void (async () => {
+      const reader = transport.datagrams.readable.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        const seq = new DataView(value.buffer, value.byteOffset, value.byteLength).getUint32(0);
+        const at = sentAt.get(seq);
+        if (at !== undefined) {
+          rtts.push(performance.now() - at);
+          sentAt.delete(seq);
+        }
+      }
+    })().catch(() => {});
+    const writer = (transport.datagrams.createWritable?.() ?? transport.datagrams.writable).getWriter();
+    const total = 300;
+    let sent = 0;
+    for (let seq = 0; seq < total && !closed; seq += 1) {
+      const packet = new Uint8Array(120);
+      new DataView(packet.buffer).setUint32(0, seq);
+      sentAt.set(seq, performance.now());
+      writer.write(packet).catch(() => {});
+      sent += 1;
+      await new Promise((resolve) => setTimeout(resolve, 1000 / 30));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    rtts.sort((a, b) => a - b);
+    if (sent < total) log(`connection closed after ${sent} of ${total} datagrams sent`);
+    log(`datagrams ${rtts.length}/${sent} echoed; rtt p50 ${percentile(rtts, 0.5)}ms p99 ${percentile(rtts, 0.99)}ms max ${percentile(rtts, 1)}ms`);
+    // One stream: a round trip of a few bytes, with its own end, since
+    // Safari's has been seen never to open.
+    try {
+      const outcome = await Promise.race([
+        (async () => {
+          const stream = await transport.createBidirectionalStream();
+          const writer = stream.writable.getWriter();
+          const reader = stream.readable.getReader();
+          const sentAt = performance.now();
+          await writer.write(new TextEncoder().encode('hello'));
+          const { value } = await reader.read();
+          await writer.close();
+          return `stream echo "${new TextDecoder().decode(value)}" in ${(performance.now() - sentAt).toFixed(1)}ms`;
+        })(),
+        new Promise((resolve) => { setTimeout(() => resolve('stream timed out after 5s'), 5000); }),
+      ]);
+      log(outcome);
+    } catch (error) {
+      log(`stream failed: ${error.message || error}`);
+    }
+    transport.close();
+  }
+
+  document.getElementById('run').addEventListener('click', () => {
+    run().catch((error) => log(`error: ${error.message || error}`));
+  });
+</script>
+</body>
+</html>

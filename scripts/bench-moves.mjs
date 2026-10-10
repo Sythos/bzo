@@ -15,10 +15,10 @@
 // Each tank joins as a browser does and spins on the spot at --rate moves a
 // second, the turn the server allows, with its sequence number in its
 // azimuth. --channel opens the channel through public/udp-channel.mjs, the
-// browser's own code, on node-datachannel's RTCPeerConnection. Server bots
+// browser's own code, on werift's RTCPeerConnection. Server bots
 // shoot, so a quiet server measures cleaner.
 import WebSocket from 'ws';
-import { RTCPeerConnection } from 'node-datachannel/polyfill';
+import werift from 'werift';
 import { createUdpChannel } from '../public/udp-channel.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, arg, i, all) => {
@@ -68,7 +68,7 @@ function join(index) {
           tank.channel = createUdpChannel({
             sendSignal: (signal) => ws.send(JSON.stringify({ type: 'rtc', ...signal })),
             onMessage: (text) => onMessage(JSON.parse(text)),
-            PeerConnection: RTCPeerConnection,
+            PeerConnection: werift.RTCPeerConnection,
           });
           void tank.channel.start();
         }

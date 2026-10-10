@@ -8,8 +8,6 @@ services:
       # movement link.
       - "5154:5154/tcp"
       - "5154:5154/udp"
-      # The UDP channel over WebRTC, when server.json has `webrtc.listen`.
-      - "5153:5153/udp"
     environment:
       SERVER_CONFIG_PATH: /data/server.json
     volumes:

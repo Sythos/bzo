@@ -936,9 +936,13 @@ export const SCOREBOARD_COLUMNS = Object.freeze([
   // makes "kick 3" and "watch 3" say the same thing to everybody.
   Object.freeze({ id: 'number', label: '#', short: '#', width: 3, narrowWidth: 3, align: 'right' }),
   // What the player is playing on, one letter the server decides
-  // (server/client-type.cjs, issue #185). bzo's own; upstream has no such
-  // column. Beside the number, where it is read at a glance, on every tier.
-  Object.freeze({ id: 'type', label: 'T', short: 'T', width: 1, narrowWidth: 1, align: 'center' }),
+  // (server/client-type.cjs, issue #185), then its UDP (`link`, #189): a
+  // BZFlag client's `u` or `+`, as `/playerlist`'s ` udp` and ` udp+`; a
+  // browser's `h` (WebTransport), `r` (WebRTC) or `t` (WebRTC through
+  // TURN), `+` once both ways. bzo's
+  // own; upstream has no such column. Beside the number, where it is read at
+  // a glance, on every tier.
+  Object.freeze({ id: 'type', label: 'T', short: 'T', width: 3, narrowWidth: 3, align: 'left' }),
   // bzo's own, with no upstream counterpart. A callsign can change between
   // sessions and a BZID cannot, so it is what an admin needs to ban or trust
   // an account rather than a name -- and it is the same number the list-server
@@ -966,6 +970,18 @@ export const SCOREBOARD_CLIENT_TYPE_NAMES = Object.freeze({
   b: 'BZFlag client',
   r: 'robot',
   s: 'server bot',
+});
+
+// And what follows it.
+const SCOREBOARD_LINK_NAMES = Object.freeze({
+  u: 'UDP in',
+  '+': 'UDP both ways',
+  r: 'WebRTC',
+  'r+': 'WebRTC both ways',
+  t: 'WebRTC through TURN',
+  't+': 'WebRTC through TURN both ways',
+  h: 'WebTransport',
+  'h+': 'WebTransport both ways',
 });
 
 // How much room the surface has, which is the only thing that decides what it
@@ -1032,7 +1048,7 @@ export function formatPersonalTally(player) {
 // that cannot kill or die has no score rather than a score of zero.
 export function formatScoreboardCell(player, columnId) {
   if (columnId === 'number') return String(player.id ?? '');
-  if (columnId === 'type') return player.clientType || '';
+  if (columnId === 'type') return `${player.clientType || ''}${player.link || ''}`;
   if (columnId === 'bzid') return player.bzid ? String(player.bzid) : '';
   if (player.isObserver) return '';
   if (columnId === 'score') {
@@ -1252,6 +1268,7 @@ export function buildScoreboardRows({
       // rather than withheld here.
       bzid: state.bzid ?? null,
       clientType: typeof state.clientType === 'string' ? state.clientType : '',
+      link: typeof state.link === 'string' ? state.link : '',
       // The head-to-head record: my kills against this player and theirs
       // against me, tracked only for opponents (Player::localWins/
       // localLosses, playing.cxx:2556) -- and, on my own row, how many times
@@ -1331,7 +1348,11 @@ function makeScoreboardCell(column, tier) {
   cell.className = `scoreboardCell scoreboardCell-${column.id}`;
   const width = getScoreboardColumnWidth(column, tier);
   if (width) {
+    // The width as well as the basis: Firefox sizes the panel from a row's
+    // cells' widths and leaves the basis out, so with the basis alone the
+    // panel came up short and the last column hung off its edge.
     cell.style.flex = `0 0 ${width}ch`;
+    cell.style.width = `${width}ch`;
     cell.style.textAlign = column.align;
   }
   return cell;
@@ -1550,7 +1571,10 @@ export function updateScoreboard({
         cell.appendChild(labelSpan);
       } else {
         cell.textContent = formatScoreboardCell(player, column.id);
-        if (column.id === 'type') cell.title = SCOREBOARD_CLIENT_TYPE_NAMES[player.clientType] || '';
+        if (column.id === 'type') {
+          cell.title = [SCOREBOARD_CLIENT_TYPE_NAMES[player.clientType], SCOREBOARD_LINK_NAMES[player.link]]
+            .filter(Boolean).join(', ');
+        }
       }
       entry.appendChild(cell);
     });

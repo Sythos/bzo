@@ -150,7 +150,10 @@ own. Browsers rejoin by themselves; a BZFlag client does not.
   server has them; the client steers each from there, as bzo's server does.
 - **UDP.** The client asks for the link straight after the handshake, a
   `MsgUDPLinkRequest` naming its id from the socket it listens on; bzo keeps
-  that address -- only from the host its TCP came from -- and answers as
+  that address -- only from the host its TCP came from, or from the
+  `proxyProtocolFrom` proxy that carried that TCP, since a client on the
+  proxy's own network reaches the forwarded UDP port through the router's
+  loop-back and arrives from the router -- and answers as
   bzfs does (`sendUDPupdate`), `MsgUDPLinkEstablished` over TCP and a
   request back over UDP. Once the client says it heard that, player
   updates, shots and guided missile updates go both ways on UDP, as

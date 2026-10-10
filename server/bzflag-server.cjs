@@ -16,6 +16,7 @@
 const https = require('https');
 const dgram = require('dgram');
 const net = require('net');
+const os = require('os');
 const {
   PROTOCOL_VERSION, GAME_STYLES, sendFrame,
 } = require('./remote-world-import.cjs');
@@ -114,6 +115,29 @@ const UDP_CODES = new Set(['sb', 'se', 'pu', 'ps', 'gm', 'of', 'og']);
 // its game port (bzfs.cxx:7690).
 const PING_REQUEST = 0x0404;
 const PING_REPLY = 0x0303;
+
+// What a datagram on the BZFlag port is (docs/port-mux-plan.md, RFC 9443):
+// by its first byte, and in 0-3 by bytes 2-3. A BZFlag datagram opens with
+// its length (under 1024, so a first byte of 0-3) and its code, two ASCII
+// letters or the ping's; STUN opens with its type, then its length past the
+// 20-byte header, then the magic cookie. 20-63 is DTLS, 64-127 and 192-255
+// QUIC.
+const STUN_COOKIE = 0x2112a442;
+function classifyDatagram(datagram) {
+  if (datagram.length < 4) return 'other';
+  const first = datagram[0];
+  if (first <= 3) {
+    const code = datagram.readUInt16BE(2);
+    if (datagram.readUInt16BE(0) + 4 <= datagram.length
+      && (code === PING_REQUEST || UDP_CODES.has(datagram.toString('latin1', 2, 4)))) return 'bzflag';
+    if (datagram.length >= 20 && code + 20 === datagram.length
+      && datagram.readUInt32BE(4) === STUN_COOKIE) return 'stun';
+    return 'other';
+  }
+  if (first >= 20 && first <= 63) return 'dtls';
+  if ((first >= 64 && first <= 127) || first >= 192) return 'quic';
+  return 'other';
+}
 // `PingPacket::PacketSize`: ServerIdPLen + 52, zero padded past the body.
 const PING_PACKET_SIZE = 8 + 52;
 
@@ -458,7 +482,11 @@ function createBzflagServer({
             socket.destroy();
             return;
           }
-          if (header.address) setSocketPeer(socket, peerAddress(header.address), header.port);
+          if (header.address) {
+            setSocketPeer(socket, peerAddress(header.address), header.port);
+            // The proxy that carried it, for the UDP link (`receiveUdp`).
+            socket.proxyPeer = from;
+          }
           buffer = buffer.subarray(header.length);
           if (buffer.length === 0) return;
         }
@@ -479,19 +507,55 @@ function createBzflagServer({
 
   const server = net.createServer(classify);
   let udp = null;
+  // Whoever else answers on the port's UDP: STUN, DTLS, QUIC (`routeUdp`).
+  const udpRoutes = {};
+
+  // A socket on a wildcard address answers from whichever of the host's
+  // addresses the kernel prefers -- an IPv6 temporary address, say -- not the
+  // one the peer sent to, and a QUIC or DTLS peer drops what comes back from
+  // an address it never contacted. Node cannot say which address a datagram
+  // was sent to, so each of the host's addresses gets a socket of its own on
+  // the port too: the kernel hands a datagram to the most specific one, and
+  // the answer goes out of the socket it came in on.
+  const addressSockets = new Map();
+  const replyVia = new Map();
+  const REPLY_VIA_IDLE_MS = 10 * 60 * 1000;
+  let addressTimer = null;
+
+  function socketFor(address, port) {
+    const entry = replyVia.get(`${address}|${port}`);
+    return entry ? entry.socket : udp;
+  }
+  function udpSend(data, port, address) {
+    socketFor(address, port)?.send(data, port, address);
+  }
+  // `dgram.Socket#send`'s shape, for a stack that sends for itself
+  // (`udpSocket`): whichever socket the peer last arrived on.
+  const udpFacade = {
+    send(msg, ...rest) {
+      const [port, address] = rest.length >= 4 ? [rest[2], rest[3]] : [rest[0], rest[1]];
+      return socketFor(address, port).send(msg, ...rest);
+    },
+    getSendQueueCount: () => Math.max(udp.getSendQueueCount(),
+      ...[...addressSockets.values()].map((socket) => socket.getSendQueueCount())),
+    address: () => udp.address(),
+  };
 
   function sendUdp(to, code, body = Buffer.alloc(0)) {
     const header = Buffer.alloc(4);
     header.writeUInt16BE(body.length, 0);
     header.write(code, 2, 2, 'latin1');
-    udp?.send(Buffer.concat([header, body]), to.port, to.address);
+    udpSend(Buffer.concat([header, body]), to.port, to.address);
   }
 
   // The client's half of the UDP link, the same handshake a bzfs answers
   // (`sendUDPupdate`, bzfs.cxx:329). It sends `MsgUDPLinkRequest` naming its
   // player id from the socket it will listen on, straight after the
   // handshake; that address is kept for it -- only from the address its TCP
-  // connection came from -- and answered with `MsgUDPLinkEstablished` over
+  // connection came from, or from the proxy that carried that connection: a
+  // client on the proxy's own network reaches the forwarded UDP port through
+  // the router's loop-back, which hands it on from the router's address,
+  // while its TCP came through the proxy with its own -- and answered with `MsgUDPLinkEstablished` over
   // TCP and a `MsgUDPLinkRequest` back over UDP. Its own
   // `MsgUDPLinkEstablished`, over UDP, says it heard that; from then on the
   // constant messages go both ways on UDP. A datagram is whole frames, walked
@@ -508,7 +572,9 @@ function createBzflagServer({
       if (code === 'of') {
         if (body.length < 1) continue;
         const id = body.readUInt8(0);
-        const connection = [...connections].find((c) => c.id === id && sameHost(c.socket.remoteAddress, from.address));
+        const connection = [...connections].find((c) => c.id === id
+          && (sameHost(c.socket.remoteAddress, from.address)
+            || (c.socket.proxyPeer && sameHost(c.socket.proxyPeer, from.address))));
         if (!connection) continue;
         connection.udpAddr = { address: from.address, port: from.port };
         sendFrame(connection.socket, 'og');
@@ -536,29 +602,74 @@ function createBzflagServer({
           resolve();
         });
       });
-      // The UDP half of the same port. Only the ping is answered; a client's
-      // UDP link comes with play.
-      udp = dgram.createSocket(host.includes(':') ? 'udp6' : 'udp4');
-      udp.on('message', (message, from) => {
-        if (message.length < 4) return;
+      // The UDP half of the same port: BZFlag's ping and a client's UDP
+      // link here, the rest to whatever `routeUdp` named for it.
+      const onMessage = (socket) => (message, from) => {
+        if (socket !== udp) replyVia.set(`${from.address}|${from.port}`, { socket, at: Date.now() });
+        const kind = classifyDatagram(message);
+        if (kind !== 'bzflag') {
+          udpRoutes[kind]?.(message, from);
+          return;
+        }
         if (message.readUInt16BE(2) === PING_REQUEST) {
-          udp.send(packPingReply(getPingStatus(), port), from.port, from.address);
+          socket.send(packPingReply(getPingStatus(), port), from.port, from.address);
           return;
         }
         receiveUdp(message, from);
-      });
-      udp.on('error', (error) => log(`[BZFLAG] UDP: ${error.message}`));
-      await new Promise((resolve, reject) => {
-        udp.once('error', reject);
-        udp.bind(port, host, () => {
-          udp.off('error', reject);
-          resolve();
+      };
+      const bindUdp = (type, address) => new Promise((resolve, reject) => {
+        const socket = dgram.createSocket({ type, reuseAddr: true });
+        socket.on('message', onMessage(socket));
+        socket.once('error', reject);
+        socket.bind(port, address, () => {
+          socket.off('error', reject);
+          socket.on('error', (error) => log(`[BZFLAG] UDP ${address}: ${error.message}`));
+          resolve(socket);
         });
       });
+      udp = await bindUdp(host.includes(':') ? 'udp6' : 'udp4', host);
+      // Each of the host's own addresses, for a wildcard `host`; again each
+      // minute, as IPv6 temporary addresses come and go.
+      const wildcard = host === '::' || host === '0.0.0.0';
+      const refresh = async () => {
+        const wanted = new Set(Object.values(os.networkInterfaces()).flat()
+          .filter((entry) => !entry.internal && !entry.address.startsWith('fe80'))
+          .filter((entry) => host === '::' || entry.family === 'IPv4')
+          .map((entry) => entry.address));
+        for (const [address, socket] of addressSockets) {
+          if (!wanted.has(address)) {
+            addressSockets.delete(address);
+            socket.close();
+          }
+        }
+        for (const address of wanted) {
+          if (addressSockets.has(address)) continue;
+          try {
+            addressSockets.set(address, await bindUdp(address.includes(':') ? 'udp6' : 'udp4', address));
+          } catch (error) {
+            log(`[BZFLAG] UDP ${address}: ${error.message}`);
+          }
+        }
+        const cutoff = Date.now() - REPLY_VIA_IDLE_MS;
+        for (const [key, entry] of replyVia) if (entry.at < cutoff) replyVia.delete(key);
+      };
+      if (wildcard) {
+        await refresh();
+        addressTimer = setInterval(() => void refresh(), 60 * 1000);
+        addressTimer.unref?.();
+      }
     },
+    // `kind` is 'stun', 'dtls' or 'quic'; `handler(datagram, from)` gets
+    // each, and answers through `udpSocket()`.
+    routeUdp(kind, handler) {
+      udpRoutes[kind] = handler;
+    },
+    udpSocket: () => udpFacade,
     close() {
       for (const connection of connections) superKill(connection);
       server.close();
+      clearInterval(addressTimer);
+      for (const socket of addressSockets.values()) socket.close();
       udp?.close();
     },
   };
@@ -614,6 +725,7 @@ module.exports = {
   REJECT_IP_BANNED,
   REJECT_ID_BANNED,
   createBzflagServer,
+  classifyDatagram,
   classifyOpening,
   publishToBzflagList,
   packPingHex,

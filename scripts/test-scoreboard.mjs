@@ -348,6 +348,13 @@ assert.equal(formatRabbitRank(0.539), '53%');
   assert.equal(formatScoreboardCell(observer, 'number'), '4');
   // What a player is playing on is said for an observer too.
   assert.equal(formatScoreboardCell({ ...observer, clientType: 'v' }, 'type'), 'v');
+  // The UDP after the letter (#189): a BZFlag client's u or +, a browser's
+  // r or h with + once both ways.
+  assert.equal(formatScoreboardCell({ ...observer, clientType: 'b', link: '+' }, 'type'), 'b+');
+  assert.equal(formatScoreboardCell({ ...observer, clientType: 'b', link: 'u' }, 'type'), 'bu');
+  assert.equal(formatScoreboardCell({ ...observer, clientType: 'd', link: 'h+' }, 'type'), 'dh+');
+  assert.equal(formatScoreboardCell({ ...observer, clientType: 'v', link: 'r' }, 'type'), 'vr');
+  assert.equal(formatScoreboardCell({ ...observer, clientType: 'm', link: 't+' }, 'type'), 'mt+');
   assert.equal(formatScoreboardCell(row, 'type'), '');
   assert.equal(formatScoreboardCell(observer, 'bzid'), '55');
   assert.equal(formatScoreboardCell(observer, 'score'), '');

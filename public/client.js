@@ -124,7 +124,7 @@ import { getMenuClickDirection, playMenuBackSound, playMenuSelectSound, setMenuS
 
 setMenuSoundPlayer((name) => renderManager.playLocalSound(name));
 import { DestructCountdown, PauseState } from './pause.mjs';
-import { createUdpChannel } from './udp-channel.mjs';
+import { createUdpChannel, createWebTransportChannel } from './udp-channel.mjs';
 import { HUNT_MARKER_COLOR, HuntState } from './hunt.mjs';
 import { XRMenuRenderer } from './xr-menu.js';
 import {
@@ -7402,23 +7402,53 @@ function init() {
   }
 }
 
-// Upstream's UDP messages over a WebRTC data channel when the server offers
-// one (#8, udp-channel.mjs); the WebSocket carries them otherwise, and the
-// signalling always.
-const udpChannel = createUdpChannel({
+// Upstream's UDP messages over WebTransport (HTTP/3 datagrams) where the
+// browser has it and the server offers it, else over a WebRTC data channel
+// (#8, #189, udp-channel.mjs); the WebSocket carries them until one opens, and
+// otherwise, and the signalling always.
+function onUdpChannelMessage(text) {
+  receivedBytes += text.length;
+  let message;
+  try {
+    message = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (UDP_CHANNEL_DOWN_TYPES.has(message?.type)) handleServerMessage(message);
+}
+const rtcChannel = createUdpChannel({
   sendSignal: (signal) => sendToServer({ type: 'rtc', ...signal }),
-  onMessage: (text) => {
-    receivedBytes += text.length;
-    let message;
-    try {
-      message = JSON.parse(text);
-    } catch {
-      return;
-    }
-    if (UDP_CHANNEL_DOWN_TYPES.has(message?.type)) handleServerMessage(message);
-  },
+  onMessage: onUdpChannelMessage,
   log: (text) => debugLog(text, 'rtc'),
 });
+const webTransportChannel = createWebTransportChannel({
+  onMessage: onUdpChannelMessage,
+  log: (text) => debugLog(text, 'rtc'),
+});
+const udpChannel = {
+  isOpen: () => webTransportChannel.isOpen() || rtcChannel.isOpen(),
+  send: (text) => (webTransportChannel.isOpen() ? webTransportChannel.send(text) : rtcChannel.send(text)),
+  close() {
+    webTransportChannel.close();
+    rtcChannel.close();
+  },
+  // From `init`: WebTransport first, WebRTC if it does not open, with TURN as
+  // WebRTC's own last resort. `?udp=h3`, `?udp=rtc`, `?udp=turn` (WebRTC
+  // through the relay alone) or `?udp=ws` in the page's URL holds a client to
+  // one, for testing a path.
+  async start(offer) {
+    const only = new URLSearchParams(window.location.search).get('udp');
+    if (only === 'ws') return;
+    if (only !== 'rtc' && only !== 'turn' && offer.webTransport && webTransportChannel.available()) {
+      if (webTransportChannel.isOpen()) return;
+      const { port, token } = offer.webTransport;
+      if (await webTransportChannel.start({ url: `https://${window.location.hostname}:${port}/udp`, token })) return;
+    }
+    if (only !== 'h3' && offer.udpChannel && !rtcChannel.isOpen()) {
+      await rtcChannel.start({ iceServers: offer.udpChannelIceServers || [], relayOnly: only === 'turn' });
+    }
+  },
+};
 
 // What the channel carries each way, upstream's UDP list (see server.js).
 const UDP_CHANNEL_UP_TYPES = new Set(['m', 'shoot']);
@@ -7770,8 +7800,8 @@ function handleServerMessage(message) {
       // may be another.
       lastMoveBatchById.clear();
       earlyShotEnds.clear();
-      if (!message.udpChannel) udpChannel.close();
-      else if (!udpChannel.isOpen()) void udpChannel.start();
+      if (!message.udpChannel && !message.webTransport) udpChannel.close();
+      else if (!udpChannel.isOpen()) void udpChannel.start(message);
       const operatorPanelTitleEl = document.getElementById('operatorPanelTitle');
       if (operatorPanelTitleEl && typeof message.serverVersion === 'string') {
         operatorPanelTitleEl.textContent = `Operator Panel (v${message.serverVersion})`;
@@ -8295,7 +8325,7 @@ function handleServerMessage(message) {
       break;
 
     case 'rtc':
-      void udpChannel.signal(message);
+      void rtcChannel.signal(message);
       break;
 
     case 'positionCorrection':

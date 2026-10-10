@@ -18,6 +18,11 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
+# The one install script bzo needs: WebTransport's native QUIC module, a
+# prebuilt binary for this platform from the package's GitHub releases. Without
+# it the image runs with HTTP/3 off (server/webtransport.cjs).
+RUN npm rebuild @fails-components/webtransport-transport-http3-quiche \
+  || echo 'WebTransport native module unavailable; HTTP/3 off'
 
 FROM mirror.gcr.io/library/ubuntu:26.04
 
@@ -64,7 +69,7 @@ RUN mkdir -p /data /app/cache/br && chown -R "$APP_UID:$APP_GID" /app /data
 
 USER ${APP_UID}:${APP_GID}
 
-EXPOSE 5153/udp 5154/tcp 5154/udp
+EXPOSE 5154/tcp 5154/udp
 VOLUME ["/data"]
 
 CMD ["node", "server.js"]

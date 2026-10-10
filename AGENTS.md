@@ -659,6 +659,7 @@ reaches collision, hits, bots, the autopilot and the drawing at once.
 | `public/webxr.js` | XR session lifecycle and controller input |
 | `public/capabilities.mjs` | What the WebGL context supports; gates features and their UI |
 | `public/voice.js` | WebRTC nearby-voice manager |
+| `public/udp-channel.mjs` | The UDP channel's browser end: WebTransport, else WebRTC |
 | `public/audio.js` | Gameplay sound manifest, attenuation, and buffer loading |
 | `public/volume.mjs` | The 0..10 audio level model shared by the Audio dialog, XR, renderer, and voice |
 | `public/voice-channels.mjs` | Which players hear each other: All, Nearby, Team |
@@ -675,8 +676,11 @@ reaches collision, hits, bots, the autopilot and the drawing at once.
 
 ### The wire
 
-One WebSocket per client, JSON objects discriminated by a `type` field, no
-second channel and no binary frames. `docs/network.md` documents it: every
+One WebSocket per client, JSON objects discriminated by a `type` field and no
+binary frames, plus the UDP channel for what bzfs sends over UDP -- moves and
+shots, the same JSON -- over WebTransport or else WebRTC, on the BZFlag port
+(`public/udp-channel.mjs`, `server/webtransport.cjs`,
+`server/udp-channel.cjs`). `docs/network.md` documents it: every
 message in both directions, where the motion packet's fields come from, and
 the mapping to the 56 binary codes bzfs speaks (`include/Protocol.h:187-317`,
 which is upstream's only protocol document).
@@ -740,7 +744,10 @@ uncertificated path, and where a browser offers neither brotli nor a service
 worker, both of which need a secure context. Bind one family and point the proxy
 at the same one: `127.0.0.1` with Caddy's `reverse_proxy 127.0.0.1:5154`, or
 `::1` with `[::1]:5154`. `localhost` is resolved to `127.0.0.1` and says so,
-because a socket binds one family and the name promises two.
+because a socket binds one family and the name promises two. A loopback bind
+also takes the BZFlag port's UDP off the network -- BZFlag, WebTransport and
+WebRTC all reach it directly, never through the proxy -- so a server with a
+`bzflag` block binds every interface.
 
 ### Assets are compressed once, not per request
 

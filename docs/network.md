@@ -15,15 +15,24 @@ motion record. This file is bzo's half of that, plus the mapping between them.
 ## Transport
 
 One WebSocket per client, to the same host and port the page was served from
-(`public/client.js` picks `wss:` for an `https:` page). That is the web port
-(`listen`) or the BZFlag port, which answers HTTP and HTTPS as well as BZFlag
-([port-mux-plan.md](port-mux-plan.md)). It carries everything, and moves too
-unless a UDP channel is open.
+(`public/client.js` picks `wss:` for an `https:` page): `listen`, which with a
+`bzflag` block is also the BZFlag port, answering HTTP, HTTPS (HTTP/2 or
+HTTP/1.1; a WebSocket comes over HTTP/1.1) and BZFlag on TCP, and BZFlag,
+WebTransport and WebRTC on UDP ([port-mux-plan.md](port-mux-plan.md)). The
+WebSocket carries everything, and moves and shots too unless a UDP channel is
+open.
 
-**The UDP channel** (#8) is upstream's UDP for a browser: a WebRTC data
-channel, negotiated as id 0, neither ordered nor retried, when server.json has
-`webrtc.listen`. It
-carries what bzfs sends over UDP (`NetHandler::pwrite`): `m` and `shoot` up;
+**The UDP channel** (#8) is upstream's UDP for a browser. It is WebTransport
+datagrams to the BZFlag port where the browser has WebTransport and
+server.json has `"webtransport": true` (#189): `init`'s `webTransport` gives
+the port and a token, good while the WebSocket is open, which the client
+sends to `/udp` in a datagram, `token:` and the token, every quarter second
+until the server answers `ok`; then the session is the player's channel. Not
+on a stream: Safari opens none to this server. Otherwise, or if that does
+not open, it is a WebRTC data channel on the BZFlag port, negotiated as id 0, neither
+ordered nor retried, when server.json has a `webrtc` block, with the IPv4
+TURN relays over UDP (`udpChannelIceServers`) as its last resort. Either way
+it carries what bzfs sends over UDP (`NetHandler::pwrite`): `m` and `shoot` up;
 `pmBatch`, `shotBegin`, `shotEnd` and `gmUpdate` down. Moves go out on it as
 they are accepted, gathered once per turn of the event loop, where the
 WebSocket gets the 16ms tick's batch -- bzfs relays on arrival too. A lost
@@ -44,7 +53,11 @@ lifetime. A message over one packet's worth, such as a laser's many-segment
 client sends at least one move a second (`MAX_UPDATE_INTERVAL`), so a lost
 stop is corrected within one. A client whose channel does not open in ten
 seconds stays on the WebSocket. `/playerlist` shows an open one as `+`, and
-` udp+` once a move has come over it, as bzfs does a client's UDP link.
+`h3+` (WebTransport), `rtc+` (WebRTC) or `turn+` (WebRTC through a TURN
+relay, known by the relay's address) once a move has come over it, as bzfs
+shows a client's `udp+`. The scoreboard's `T` column puts the same after the
+client's letter: `h`, `r` or `t`, `+` once both ways, so `dh+` is a desktop on
+WebTransport; a BZFlag client is `b`, `bu` or `b+`.
 
 `new WebSocketServer({ server })` (`server.js:1312`) takes ws's defaults, which
 means no `permessage-deflate` -- frames go out as uncompressed UTF-8 -- and

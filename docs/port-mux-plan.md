@@ -1,8 +1,10 @@
 # One port
 
-Plan for serving everything on the BZFlag port: one TCP and one UDP, so an
-operator's firewall -- or `bzflag.upnp` -- has two rules to make, not four.
-Issues #190 (TCP) and #189 (UDP).
+Everything on the BZFlag port, one TCP and one UDP, so an operator's
+firewall -- or `bzflag.upnp` -- has two rules to make, not four. Issues #190
+(TCP) and #189 (UDP). This file holds the findings and what is left; how to
+configure it is in [installation.md](installation.md), the wire in
+[network.md](network.md).
 
 ## TCP: built (#190)
 
@@ -33,22 +35,27 @@ serves the app over TLS on the BZFlag port. A headset needs it for WebXR.
 With a `bzflag` block, `listen` is the BZFlag port, so one TCP port carries
 everything; a reverse proxy points at it.
 
-Not done: HTTP/2 and HTTP/3 for the web app. The client's startup checks
-whether each shared asset (images, audio, models) changed; over HTTP/1.1
-those revalidations queue a few at a time on each connection, where HTTP/2
-or HTTP/3 runs them all at once on one. Node's `http2` with `allowHTTP1`
-would take HTTP/2, but Express 4 only partly runs on its compatibility layer
-and `ws` has no WebSockets over HTTP/2. HTTP/3 comes with WebTransport below,
-announced by an `Alt-Svc` header over HTTPS.
+HTTP/2 where the browser offers it: with `https`, the BZFlag port's TLS is
+Node's `http2.createSecureServer` with `allowHTTP1`, so a page's many
+requests -- the client's startup check of every shared asset among them --
+share one connection, and HTTP/1.1 still answers anything that asks for it,
+WebSocket upgrades included. Express 4 is not written for HTTP/2's request
+and response objects: it swaps their prototypes for HTTP/1's, hiding theirs.
+`server/http2-bridge.cjs` pins HTTP/2's methods and accessors, Symbol-keyed
+ones too, onto each object first, and fills `Host` from `:authority`. Pages,
+assets with Brotli and conditional 304s, JSON, the 404 page and the game in
+headless Chrome all ran on `h2`. A reverse proxy in front speaks HTTP/1.1 to
+bzo, so a player through one gets HTTP/2 only as far as the proxy.
 
-## UDP: to do (#189)
+## UDP: built (#189)
 
 One UDP port carrying BZFlag, WebTransport and WebRTC, a browser taking the
 best that connects:
 
 1. **WebTransport** (HTTP/3) on the BZFlag port: datagrams for what bzfs
-   sends over UDP, a stream for the rest. Every current browser has it;
-   Safari since 26.4.
+   sends over UDP. Every current browser has it; Safari since 26.4.
+   Everything else stays on the WebSocket: Safari opens no stream to this
+   server, so streams cannot replace it.
 2. **WebRTC** (the UDP channel) on the same port, where WebTransport does not
    connect.
 3. **WebRTC through TURN over UDP**, the voice servers' relay, for a network
@@ -56,7 +63,7 @@ best that connects:
    no better than the WebSocket, so not that.
 4. **The WebSocket**, which opens first in every case and carries everything
    until one of the above does. It stays: a network with no UDP, a reverse
-   proxy (Apache does not pass QUIC), and an older browser all need it.
+   proxy (none passes QUIC), and an older browser all need it.
 
 ### Telling the traffic apart
 
@@ -93,9 +100,9 @@ to take its packets from bzo's socket and send through it:
 - **@fails-components/webtransport** over its quiche transport: QUIC and
   HTTP/3 are native, and its server socket is a Node `dgram` socket read in
   JavaScript, so its `init` takes the shared socket in place of binding one.
-- **libdatachannel** (node-datachannel, what `webrtc.listen` runs today)
-  binds its own socket, and neither it nor libjuice takes packets from
-  outside. It stays on its own port.
+- **libdatachannel** (node-datachannel) binds its own socket, and neither it
+  nor libjuice takes packets from outside, so it needed a port of its own.
+  bzo no longer uses it.
 
 ### Measured
 
@@ -129,25 +136,122 @@ fraction of that 2%. Each stack already takes the cheap one where it can:
 - werift has only AES-128-GCM.
 - QUIC is TLS 1.3, and BoringSSL under quiche takes AES-128-GCM on a CPU
   with AES instructions and ChaCha20 on one without, as browsers ask.
-- libdatachannel offers `ALL:...:@STRENGTH`, 256-bit first, and browsers
-  settle on ChaCha20 with it (`[RTC]` logs each one's). Changing that means
-  patching it, which moving off it makes moot.
+- libdatachannel offered `ALL:...:@STRENGTH`, 256-bit first, and browsers
+  settled on ChaCha20 with it; werift, which replaced it, settles on
+  AES-128-GCM (`[RTC]` logs each browser's).
+
+### Built
+
+- The BZFlag port sorts its datagrams (`classifyDatagram`,
+  `server/bzflag-server.cjs`, tested in `scripts/test-port-mux.mjs`): BZFlag's
+  to its handler, the rest to whatever `routeUdp` names for STUN, DTLS or
+  QUIC.
+- `"webtransport": true` puts HTTP/3 on that socket
+  (`server/webtransport.cjs`) with the `https` certificate, answering
+  `/wt-test` only: `public/wt-test.html` echoes datagrams at 30 a second and
+  one stream. On the Let's Encrypt certificate, the page through the reverse
+  proxy and WebTransport straight to 5154, over IPv6 on the LAN:
+
+  | browser | open | datagrams back | round trip p50 / p99 |
+  |---|---|---|---|
+  | Chrome 154, Windows 11 | 12-20 ms | 300 of 300 | 2.0 / 3.0 ms |
+  | Chrome 152, Linux (Orin) | 35 ms | 300 of 300 | 1.9 / 3.6 ms |
+  | Chrome 154, Windows 11, IPv4 | - | 300 of 300 | 2.0 / 19-22 ms |
+  | Chrome 152, Linux (Orin), IPv4 from a DMZ | - | 300 of 300 | 1.7 / 26.7 ms |
+  | Oculus Browser 152, Quest 2 | 17 ms | 300 of 300 | 4.2 / 25.2 ms |
+  | Chrome 155, Android phone, Verizon IPv6 | - | 300 of 300 | 52 / 95 ms |
+  | Chrome 155, Android phone, Wi-Fi IPv4 | - | 300 of 300 | 6.4 / 35 ms |
+  | Chrome 155, Android phone, Wi-Fi IPv6 | - | 300 of 300 | 7.1 / 14.7 ms |
+  | Firefox 153, Linux | - | in play | `dh+` on the scoreboard |
+  | Safari 26.6, iPhone, IPv6 | 24-44 ms | 300 of 300 | 4 / 9-11 ms |
+  | headless Chrome 155, this host | 69 ms | 300 of 300 | 1.3 / 2.1 ms |
+
+  The IPv4 run came from the LAN through the router's loop-back (NAT
+  reflection), which adds jitter. A host on a public DMZ address could not
+  reach the forwarded port over UDP until the router forwarded UDP from the
+  DMZ as well: its TCP went through a proxy on the router, and its loop-back
+  forward covered only the LAN's own subnets.
+
+  A phone on the server's own LAN got Chrome's Local Network Access prompt
+  ("access to your local devices"); until it was allowed, opens failed at
+  once with nothing on the wire. A player on the internet should not see it.
+
+  A Quest set down mid-run drops every session at once when it sleeps; its
+  log lines arrive when it wakes. That is the headset, not loss: every Quest
+  run before it was put down came back whole.
+
+  Safari 26.6 on iOS opens a session and carries datagrams, but never opens
+  a bidirectional stream to this server, and has only `createWritable` for
+  datagrams, not Chrome's older `writable`. So the game's token goes in a
+  datagram, not on a stream. Its `ready` was also seen never to settle after
+  a close, so every wait on WebTransport has its own end. It reports a
+  maximum datagram of 65535 bytes, which the path cannot carry; the 1000-byte
+  split holds anyway.
+
+  A real Chrome's largest datagram is 1024 bytes (headless said 1211), under
+  the 1100 the UDP channel splits batches to, so the game's batches over
+  WebTransport have to split smaller.
+- Every one of the host's addresses has its own socket on the port, beside
+  the wildcard one. A wildcard socket answers from whichever address the
+  kernel prefers -- here an IPv6 temporary address -- not the one the peer
+  sent to, and QUIC drops what comes back from an address it never
+  contacted; Node cannot say which address a datagram arrived on. The kernel
+  gives a datagram to the most specific socket, and the answer leaves by the
+  socket it came in on. The list is refreshed each minute, as temporary
+  addresses come and go.
+
+- The game's UDP channel over WebTransport (`/udp`): `init` offers the port
+  and a token; the client opens WebTransport where it can and falls back to
+  the WebRTC channel; the session stands in as the player's `udpChannel`, so
+  sending, batching and `/playerlist` are the WebRTC channel's. Messages are
+  split to 1000 bytes for Chrome's 1024-byte datagrams. `[WT]` logs each
+  player that takes it.
+
+- WebRTC on the BZFlag port: `"webrtc": {}` runs the UDP channel's WebRTC
+  on werift over the port's socket (`server/udp-channel.cjs`), STUN and DTLS
+  routed by ICE username then by address, its public IPv4 learnt once by
+  STUN. libdatachannel's own port (`webrtc.listen`, 5153) and node-datachannel
+  are gone; an old `listen` is set aside with a line in the log. Headless
+  Chrome held to it (`?udp=rtc`) opened through the router's loop-back on
+  AES-128-GCM and carried moves both ways (`r+`);
+  `scripts/test-udp-channel.mjs` round-trips it on a shared socket. It is
+  ICE-lite, answering checks and gathering nothing: werift otherwise asks a
+  STUN server, Google's when none is named, from the shared socket, where the
+  answer has no peer to go to, and every answer waited out five seconds. And
+  it is the DTLS server (`a=setup:passive`): as the client, its hello never
+  reached Firefox, which then stalled after ICE connected. Firefox 153, the
+  Orin and Win11 held to it all open in well under a second; Firefox and
+  the Orin held to the relay (`?udp=turn`) reached the port from turn4.
+  `/playerlist` says `turn+` and the scoreboard `t+` for a channel whose
+  peer is one of the configured TURN relays' addresses.
+
+- TURN over UDP: `init`'s `udpChannelIceServers` are the IPv4 voice relays'
+  `turn:...?transport=udp` with the player's own credential, so WebRTC falls
+  back to the relay when no direct pair works. Headless Chrome held to the
+  relay (`?udp=turn`) reached the BZFlag port from turn4 and carried moves
+  both ways (`r+`).
 
 ### Next
 
-WebTransport and werift on the BZFlag port, behind the BZFlag handler's own
-check, retire `webrtc.listen` and its second port. Before that:
+1. The load on the Orin, where CPU runs out (`scripts/bench-udp-stack.mjs`).
+2. Whether capture claims, on the WebSocket, overtake the last moves on UDP:
+   one `CAPTURE CLAIMED ... standing on no base` so far.
 
-- the same load on the Orin, which is where CPU runs out;
-- a browser end: Chrome and the Quest on WebTransport to this server (the
-  Node client above is quiche too), and whether they send the
-  `:protocol = "webtransport"` token it accepts;
-- quiche's native module on arm64, which the image builds for;
-- WebTransport's certificate: the `https` one, valid for the name a player
-  uses, since the reverse proxy cannot carry QUIC.
+The WebTransport packages are optional dependencies. quiche's native module
+is a prebuilt binary from the package's GitHub releases, linux-x64 and
+linux-arm64 among them, needing glibc 2.38 or later and nothing else; the
+image's `npm ci --ignore-scripts` skips its download, so the Dockerfile runs
+that one package's install on its own. Built and loaded in the amd64 image;
+the arm64 binary checked by hand (aarch64, libc and libm only).
 
 ## HTTP/3
 
-WebTransport brings an HTTP/3 server on the BZFlag port. Serving the web app
-over it as well, found through `Alt-Svc`, is the HTTP/2 and HTTP/3 item
-under TCP above.
+Not for the web app, on this stack. The quiche transport's server sends
+every request that is not a WebTransport CONNECT to a 404 (its backend call
+is commented out, `http3serverstream.cc`), so nothing may advertise HTTP/3 for
+the BZFlag port: an `Alt-Svc: h3` there would have browsers fetch the app over
+HTTP/3 and get 404s. Node 22 has no `node:quic`. HTTP/3 would take patching
+the library's native code or a separate HTTP/3 front on another UDP port.
+
+What would speed up the client's startup checks is many requests at once on
+one connection, which HTTP/2 gives; see TCP above.
