@@ -50,6 +50,12 @@ const BUCKET = 32;
 // A tank standing still, turned any way: a circle a little under its half
 // length, which is what a corridor has to fit for a tank to turn in it.
 const STAND_RADIUS = 1.6;
+// How far from a column's centre a wall thinner than a column still fills it
+// for a flight: half the column's diagonal, so one anywhere in the column is
+// in it -- a one-unit wall run diagonally between two centres is no gap.
+// Anything thicker keeps `STAND_RADIUS`, so a tank driving off a platform's
+// edge is not taken to hit the platform it leaves.
+const THIN_SOLID_MARGIN = NAV_CELL * Math.SQRT1_2;
 // A tank driving, rather than standing, sweeps out to its half length as it
 // turns. A node with something solid inside that is tight -- passable, as a
 // standing tank fits, but a corner a tank turning round it catches and
@@ -71,6 +77,9 @@ const STEP_UP = 0.33;
 // most, since it is taken square and from a standstill, and in the air a tank
 // cannot dodge.
 const FLIGHT_SPEEDS = [1, 0.6, 0.3];
+// How far a flight's landing may be missed by, to the side or long, and still
+// come down on the same surface.
+const LANDING_ROOM = NAV_CELL;
 const FLIGHT_STRIDE = 2;
 const FLIGHT_STEP = NAV_CELL / 2;
 const FLIGHT_MAX_STEP_SECONDS = 0.1;
@@ -148,16 +157,18 @@ function solidsAt(obstacles, x, y) {
   for (const obs of obstacles) {
     if (obs.driveThrough) continue;
     const b = obstacleFootprint(obs);
-    if (x < b.minX - STAND_RADIUS || x > b.maxX + STAND_RADIUS
-      || y < b.minY - STAND_RADIUS || y > b.maxY + STAND_RADIUS) continue;
+    const thin = obs.type !== 'mesh' && Math.min(halfWidth(obs), halfBreadth(obs)) < NAV_CELL / 2;
+    const margin = thin ? THIN_SOLID_MARGIN : STAND_RADIUS;
+    if (x < b.minX - margin || x > b.maxX + margin
+      || y < b.minY - margin || y > b.maxY + margin) continue;
     const bottom = getObstacleBase(obs);
     let top;
     if (obs.type === 'mesh') {
       top = meshTop(obs);
     } else {
       const local = getColliderLocalPoint(x, y, obs);
-      if (Math.abs(local.x) > halfWidth(obs) + STAND_RADIUS
-        || Math.abs(local.y) > halfBreadth(obs) + STAND_RADIUS) continue;
+      if (Math.abs(local.x) > halfWidth(obs) + margin
+        || Math.abs(local.y) > halfBreadth(obs) + margin) continue;
       top = bottom + (obs.type === 'pyramid' ? getPyramidHeight(obs) : height(obs));
     }
     if (Number.isFinite(top) && top > bottom) out.push([bottom, top]);
@@ -221,8 +232,8 @@ export function buildNavGraph(world) {
   const bucketOf = (value) => Math.max(0, Math.min(bucketCount - 1, Math.floor((value + half) / BUCKET)));
   for (const obs of obstacles) {
     const b = obstacleFootprint(obs);
-    for (let bx = bucketOf(b.minX - STAND_RADIUS); bx <= bucketOf(b.maxX + STAND_RADIUS); bx++) {
-      for (let by = bucketOf(b.minY - STAND_RADIUS); by <= bucketOf(b.maxY + STAND_RADIUS); by++) {
+    for (let bx = bucketOf(b.minX - THIN_SOLID_MARGIN); bx <= bucketOf(b.maxX + THIN_SOLID_MARGIN); bx++) {
+      for (let by = bucketOf(b.minY - THIN_SOLID_MARGIN); by <= bucketOf(b.maxY + THIN_SOLID_MARGIN); by++) {
         buckets[(by * bucketCount) + bx].push(obs);
       }
     }
@@ -457,9 +468,14 @@ export function buildNavGraph(world) {
     // different lies within a flight's reach at all.
     let edge = null;
     let different = false;
+    // A wall standing on this floor short of the edge: no driving off past
+    // it, however level the floor runs on beyond. A jump's own arc is tested
+    // against it as it flies.
+    let walled = false;
     for (let d = FLIGHT_STEP; d <= FLIGHT_REACH; d += FLIGHT_STEP) {
-      const { ids } = columnAt(d);
+      const { ids, solid } = columnAt(d);
       const level = ids && ids.some((id) => Math.abs(nodes[id].z - node.z) <= STEP_UP);
+      if (level && isBlocked(solid, node.z + STEP_UP)) walled = true;
       if (!level) {
         if (edge === null) edge = d;
         different = true;
@@ -468,10 +484,21 @@ export function buildNavGraph(world) {
       if (ids.some((id) => Math.abs(nodes[id].z - node.z) > STEP_UP)) different = true;
     }
     if (!different) return;
+    // A drive-off leaves along an edge with floor to either side of it, not
+    // off a corner's point, where a pilot a little off the line goes over
+    // the side early or turns back short of the drop.
+    if (edge !== null && !walled) {
+      const before = Math.max(0, edge - FLIGHT_STEP);
+      const px = node.x + (ux * before);
+      const py = node.y + (uy * before);
+      const side = (sign) => levelNear(column(columnOf(px - (uy * LANDING_ROOM * sign)),
+        rowOf(py + (ux * LANDING_ROOM * sign))), node.z);
+      if (!side(1) || !side(-1)) walled = true;
+    }
     const best = new Map();
     const launches = jump ? [false, true] : [false];
     for (const jumping of launches) {
-      if (!jumping && edge === null) continue;
+      if (!jumping && (edge === null || walled)) continue;
       for (const share of FLIGHT_SPEEDS) {
         const u = share * tankSpeed;
         // A drive-off leaves when the tank's back clears the edge; a jump,
@@ -511,6 +538,7 @@ export function buildNavGraph(world) {
         }
         if (landed === null || landed === node.id) continue;
         if (!jumping && nodes[landed].z >= node.z - STEP_UP) continue;
+        if (!landingHasRoom(nodes[landed], ux, uy)) continue;
         const cost = (launch / u) + time + (jumping ? JUMP_SETUP_SECONDS : FLIGHT_SETUP_SECONDS);
         if ((best.get(landed)?.cost ?? Infinity) <= cost) continue;
         best.set(landed, {
@@ -524,6 +552,19 @@ export function buildNavGraph(world) {
       }
     }
     for (const move of best.values()) out.push(move);
+  };
+
+  // A pilot's landing is never exactly the one flown: the same surface a
+  // cell to either side of it and a cell further on, or the flight is a
+  // corner a small miss falls off. A slower flight that only clips the tip
+  // of a turned base is dropped, and a faster one that lands well onto it
+  // is the way up.
+  const landingHasRoom = (landing, ux, uy) => {
+    const offsets = [[-uy, ux], [uy, -ux], [ux, uy]];
+    return offsets.every(([ox, oy]) => levelNear(
+      column(columnOf(landing.x + (ox * LANDING_ROOM)), rowOf(landing.y + (oy * LANDING_ROOM))),
+      landing.z,
+    ));
   };
 
   const inGrid = (cx, cy) => cx >= 0 && cy >= 0 && cx < columns && cy < columns;

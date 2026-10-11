@@ -23,41 +23,40 @@ WebSocket carries everything, and moves and shots too unless a UDP channel is
 open.
 
 **The UDP channel** (#8) is upstream's UDP for a browser. It is WebTransport
-datagrams to the BZFlag port where the browser has WebTransport and
-server.json has `"webtransport": true` (#189): `init`'s `webTransport` gives
-the port and a token, good while the WebSocket is open, which the client
-sends to `/udp` in a datagram, `token:` and the token, every quarter second
-until the server answers `ok`; then the session is the player's channel. Not
-on a stream: Safari opens none to this server. Otherwise, or if that does
-not open, it is a WebRTC data channel on the BZFlag port, negotiated as id 0, neither
-ordered nor retried, when server.json has a `webrtc` block, with the IPv4
-TURN relays over UDP (`udpChannelIceServers`) as its last resort. Either way
-it carries what bzfs sends over UDP (`NetHandler::pwrite`): `m` and `shoot` up;
+datagrams to the BZFlag port where the browser has WebTransport and the server
+has `https` and has not set `"webtransport": false` (#189): `init`'s
+`webTransport` gives the port and a token, good while the WebSocket is open,
+which the client sends to `/udp` in a datagram, `token:` and the token, every
+quarter second until the server answers `ok`; then the session is the player's
+channel. Not on a stream: Safari opens none to this server. Otherwise, or if
+that does not open, it is a WebRTC data channel on the BZFlag port, negotiated
+as id 0, neither ordered nor retried, unless `"webrtc": false`, with the IPv4
+TURN relays over UDP (`udpChannelIceServers`) as its last resort. Either way it
+carries what bzfs sends over UDP (`NetHandler::pwrite`): `m` and `shoot` up;
 `pmBatch`, `shotBegin`, `shotEnd` and `gmUpdate` down. Moves go out on it as
 they are accepted, gathered once per turn of the event loop, where the
-WebSocket gets the 16ms tick's batch -- bzfs relays on arrival too. A lost
-move is lost, where on the WebSocket it would arrive late and hold every move
-behind it. Signalling is
-`rtc` on the WebSocket: the client offers, the server answers. Every peer
-shares one UDP port, IPv4 only -- a phone on Verizon drops its data session
-over WebRTC on IPv6 -- and the server finds its public address with STUN
-(`webrtc.iceServers`, else the `stun:` entries of `voiceIceServersIpv4`).
-No certificate is needed: DTLS uses a throwaway one whose fingerprint rides
-the signalling. Order is kept by the clocks: the server drops a move whose
-`ct` is not newer than the last it took, and the client a batch whose `n` is
-older than the last it applied for that tank -- upstream's `order` on
-MsgPlayerUpdate. A `shotEnd` that overtakes its `shotBegin` is remembered and
-the late start dropped; upstream drops the end and the shot flies its
-lifetime. A message over one packet's worth, such as a laser's many-segment
-`shotBegin`, takes the WebSocket. With the channel on, every
-client sends at least one move a second (`MAX_UPDATE_INTERVAL`), so a lost
-stop is corrected within one. A client whose channel does not open in ten
-seconds stays on the WebSocket. `/playerlist` shows an open one as `+`, and
-`h3+` (WebTransport), `rtc+` (WebRTC) or `turn+` (WebRTC through a TURN
-relay, known by the relay's address) once a move has come over it, as bzfs
-shows a client's `udp+`. The scoreboard's `T` column puts the same after the
-client's letter: `h`, `r` or `t`, `+` once both ways, so `dh+` is a desktop on
-WebTransport; a BZFlag client is `b`, `bu` or `b+`.
+WebSocket gets the 16ms tick's batch -- bzfs relays on arrival too. A lost move
+is lost, where on the WebSocket it would arrive late and hold every move behind
+it. Signalling is `rtc` on the WebSocket: the client offers, the server
+answers. Every peer shares one UDP port, IPv4 only -- a phone on Verizon drops
+its data session over WebRTC on IPv6 -- and the server finds its public address
+with STUN (`webrtc.iceServers`, else the `stun:` entries of
+`voiceIceServersIpv4`). No certificate is needed: DTLS uses a throwaway one
+whose fingerprint rides the signalling. Order is kept by the clocks: the server
+drops a move whose `ct` is not newer than the last it took, and the client a
+batch whose `n` is older than the last it applied for that tank -- upstream's
+`order` on MsgPlayerUpdate. A `shotEnd` that overtakes its `shotBegin` is
+remembered and the late start dropped; upstream drops the end and the shot
+flies its lifetime. A message over one packet's worth, such as a laser's
+many-segment `shotBegin`, takes the WebSocket. With the channel on, every
+client sends at least one move a second (`MAX_UPDATE_INTERVAL`), so a lost stop
+is corrected within one. A client whose channel does not open in ten seconds
+stays on the WebSocket. `/playerlist` shows an open one as `+`, and `h3+`
+(WebTransport), `rtc+` (WebRTC) or `turn+` (WebRTC through a TURN relay, known
+by the relay's address) once a move has come over it, as bzfs shows a client's
+`udp+`. The scoreboard's `T` column puts the same after the client's letter:
+`h`, `r` or `t`, `+` once both ways, so `dh+` is a desktop on WebTransport; a
+BZFlag client is `b`, `bu` or `b+`.
 
 `new WebSocketServer({ server })` (`server.js:1312`) takes ws's defaults, which
 means no `permessage-deflate` -- frames go out as uncompressed UTF-8 -- and

@@ -15,7 +15,7 @@ options
 	-fb
 	# Tanks may jump. bzo has jumping on unless server.json turns it off,
 	# so this is what turns it back on for this world.
-	#-j
+	-j
 	# Every shot ricochets, whatever flag fired it.
 	+r
 	# Five shots in the air at once, where bzfs gives one. The reload time

@@ -3,9 +3,8 @@ services:
     image: ghcr.io/timriker/bzo:latest
     restart: unless-stopped
     ports:
-      # The web app, and BZFlag clients when server.json has a `bzflag`
-      # block: TCP for the game and the web app, UDP for BZFlag's ping and
-      # movement link.
+      # The one port: TCP for the web app and BZFlag clients, UDP for
+      # BZFlag, WebTransport and WebRTC.
       - "5154:5154/tcp"
       - "5154:5154/udp"
     environment:

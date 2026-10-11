@@ -58,9 +58,15 @@ Roger stays upstream's; these go into Ace. In order of payoff:
    (`scripts/bench-pilot.mjs`) runs every base-to-base pair of a map with
    the server bot's physics and Ace's driving strategies side by side --
    `ACE_TUNING` in `public/autopilot.mjs` holds the choices. On hix the
-   defaults arrive 12 of 12, in 28 to 41 seconds: the straight line a
+   defaults arrive 12 of 12, in 27 to 32 seconds: the straight line a
    person drives -- jump down onto the box in front of the base, drive off
    it, jump onto the box in front of the other base, and up again.
+
+   Where he gets stuck is measured the same way: `npm run bench:stuck`
+   (`scripts/bench-stuck.mjs`) drives between seeded random spots on every
+   surface and lists, by place, each back-off, missed jump and run that
+   never arrived; `--trace <run>` prints one run's drive. On hix, 300 of
+   300 arrive with only scattered single back-offs.
 
    That route exists because the graph flies its jumps and drops rather than
    assuming them. From every other column, each of the eight ways, it flies
@@ -84,7 +90,10 @@ Roger stays upstream's; these go into Ace. In order of payoff:
 4. **Dodging.** Trace each enemy shot against the bot's own planned path,
    rather than reacting to the nearest shot only.
 5. **Choosing.** Score each option (threat, flag value, team goal) rather than
-   follow a fixed priority list.
+   follow a fixed priority list. The game score already moves the list: a
+   foe landing on Ace's level within a shot's reach comes first, a foe
+   `DOMINANT_LEAD` clear of everyone is hunted ahead of captures, and Ace
+   `LOSING_MARGIN` under his foes' average fights rather than fetches.
 6. **Team roles** for capture-the-flag: attack, defend, escort. Bots on a
    team divide the work between them -- one goes for the enemy flag, one
    brings ours back, one guards it -- and say so to each other, so two do

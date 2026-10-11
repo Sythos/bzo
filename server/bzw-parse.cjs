@@ -5728,6 +5728,29 @@ function summariseMap(entry) {
   };
 }
 
+// A map's zones as a client's world carries them, each kind a list of
+// rectangles with what it is for: `safetyZones` the teams whose dropped flag
+// lands there, `flagZones` the flag types that spawn there, `spawnZones` the
+// teams whose tanks do. Teams are colour indices.
+function clientZones(zones = []) {
+  const shape = (zone) => ({
+    x: zone.x,
+    y: zone.y,
+    z: zone.z,
+    halfWidth: zone.halfWidth,
+    halfDepth: zone.halfDepth,
+    rotation: zone.rotation,
+  });
+  return {
+    safetyZones: zones.filter((zone) => zone.safety.size > 0)
+      .map((zone) => ({ ...shape(zone), teams: [...zone.safety] })),
+    flagZones: zones.filter((zone) => zone.flagTypes.size > 0)
+      .map((zone) => ({ ...shape(zone), flags: [...zone.flagTypes] })),
+    spawnZones: zones.filter((zone) => zone.teams.size > 0)
+      .map((zone) => ({ ...shape(zone), teams: [...zone.teams] })),
+  };
+}
+
 // A parsed map as the world file bzo serves, and what is known of it: the
 // JSON, its hash, the stats the map lists show, and the overview picture when
 // `withOverview` asks for one (`server/map-overview.cjs`, issue #147). Pure, so
@@ -5763,15 +5786,7 @@ function buildWorldFile(map, { gameConfig, serverBzdb, puffClouds, defaultMapSiz
     // The zones that are a team's safety, where its flag lands when dropped
     // on another team's base. Upstream packs every zone into the world a
     // client downloads (EntryZones::pack), so a client's autopilot may use it.
-    safetyZones: (map.zones || []).filter((zone) => zone.safety.size > 0).map((zone) => ({
-      x: zone.x,
-      y: zone.y,
-      z: zone.z,
-      halfWidth: zone.halfWidth,
-      halfDepth: zone.halfDepth,
-      rotation: zone.rotation,
-      teams: [...zone.safety],
-    })),
+    safetyZones: clientZones(map.zones).safetyZones,
     // Where a sky beacon hangs from, and bzo's puffs float from when asked for.
     cloudBase,
     clouds: puffClouds ? generateClouds(cloudBase, seededRandom(seed)) : [],
@@ -5814,6 +5829,11 @@ function buildWorldFile(map, { gameConfig, serverBzdb, puffClouds, defaultMapSiz
     // `announceWorldMessages` in client.js.
     messages: Array.isArray(map.messages) ? map.messages : [],
   };
+  // Where flags of a type and a team's tanks come into the world, for the
+  // autopilot; only on a map that has them, for the same reason as below.
+  const { flagZones, spawnZones } = clientZones(map.zones);
+  if (flagZones.length) entry.flagZones = flagZones;
+  if (spawnZones.length) entry.spawnZones = spawnZones;
   // Only when a map actually places something this way. Adding empty fields
   // to every other map would reissue every hash for nothing -- the entry is
   // what the hash is taken over.
@@ -5851,6 +5871,7 @@ module.exports = {
   WORLD_FORMAT,
   configureBzwParse,
   buildWorldFile,
+  clientZones,
   DEFAULT_WATER_TEXTURE_MATRIX,
   UNSUPPORTED_TOP_LEVEL_KEYWORDS,
   BZW_INERT_MATERIAL_KEYWORDS,

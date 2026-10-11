@@ -172,9 +172,17 @@ function standsOnFlatTop(obs, x, y, z) {
   if (!obs) return true;
   if (obs.type === 'pyramid') return isPyramidFlatTop(obs);
   if (obs.type === 'tetra') return false;
-  if (obs.type === 'mesh') return meshFlatTopsAt(obs, x, y).some((top) => Math.abs(top - z) < 0.05);
+  if (obs.type === 'mesh') {
+    // Upstream asks the face the tank stands on; bzo knows the mesh, so it
+    // asks under the tank: its centre, or a little to each side of it, where
+    // a tank whose centre hangs over the edge of a flat face still rests on
+    // it -- and jumps from it as from any other flat top.
+    return FLAT_TOP_SAMPLES.some(([dx, dy]) => meshFlatTopsAt(obs, x + dx, y + dy)
+      .some((top) => Math.abs(top - z) < 0.05));
+  }
   return true;
 }
+const FLAT_TOP_SAMPLES = [[0, 0], [2, 0], [-2, 0], [0, 2], [0, -2]];
 
 // LocalPlayer::doJump's vertical component. Wings has its own; Bouncy's bounce
 // is a random quarter-to-full of the world's, so no two are the same height.

@@ -90,6 +90,9 @@ Built (`docs/replay.md`). Left:
   awkward to read back.
 - **`/record file` to disk as it goes,** rather than out of the buffer at
   `/record stop`, for a recording longer than the buffer.
+- **Paused players:** a snapshot carries no MsgPause, so a viewer joining
+  after a pause sees that player as active; upstream's `Record::sendStates`
+  leaves it out too. The state packets could add one for each paused player.
 - **Snapshot size:** a snapshot's flag state is most of the buffer and of the
   file on a map with many flags; one that only says what changed would be
   smaller, though bzfs writes them whole.

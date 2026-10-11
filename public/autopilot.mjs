@@ -19,7 +19,7 @@
 // the pilot reports. A positive rotation turns left.
 
 import {
-  canRunOver, getFlagTuning, getRunOverRadius, isBadFlag,
+  canRunOver, getFlagGrabRadius, getFlagTuning, getRunOverRadius, isBadFlag,
 } from './flags.mjs';
 import { SHOT_COLLISION_RADIUS, traceShotStep, TANK } from './collision.mjs';
 import { buildNavGraph, NAV_CELL, planJump } from './nav.mjs';
@@ -67,7 +67,7 @@ const HARD_FLAGS = new Set(['US', 'MG', 'ID']);
 
 function createStats() {
   return {
-    modes: {}, shots: 0, jumps: 0, falls: 0, plans: 0, unreachable: 0, unsticks: 0, held: 0, kept: 0,
+    modes: {}, shots: 0, jumps: 0, falls: 0, plans: 0, unreachable: 0, unsticks: 0, held: 0, kept: 0, safer: 0,
   };
 }
 
@@ -602,6 +602,19 @@ const RETALIATE_WEIGHT = 0.5;
 // by `LEADER_WEIGHT`.
 const LEADER_LEAD = 5;
 const LEADER_WEIGHT = 0.6;
+// One this far clear is running away with the game: Ace hunts him wherever
+// he is, ahead of captures and flags, and he counts as nearer by
+// `DOMINANT_WEIGHT` instead.
+const DOMINANT_LEAD = 10;
+const DOMINANT_WEIGHT = 0.3;
+// Ace this far below his foes' average score is losing, and goes after his
+// own score -- kills -- rather than captures and flags: a capture gives way
+// to any foe he can shoot within `LOSING_FIGHT_RANGE`, a foe past Roger's
+// chase range is hunted, and only a flag within `LOSING_FLAG_RANGE` is worth
+// the detour.
+const LOSING_MARGIN = 3;
+const LOSING_FIGHT_RANGE = 150;
+const LOSING_FLAG_RANGE = 40;
 // A teleport leg is driven square to the face: more than `TELEPORT_ALIGN`
 // off its centre line, and further out than `TELEPORT_ALIGN_RANGE`, Ace gets
 // back onto the line first; then he aims `TELEPORT_THROUGH` past the face.
@@ -650,6 +663,10 @@ const OVER_BASE_FOE_RANGE = 60;
 // `CAMP_SPOT_COOLDOWN` seconds -- after `CAMP_AVOID_LIMIT` dodges there within
 // `CAMP_AVOID_WINDOW`, or when a foe with Shock Wave is within reach of it.
 const CAMP_FLAGS = new Set(['GM', 'L', 'SB']);
+// Identify is kept -- it names the flags Ace passes, and the bad ones are
+// then driven round -- and given up only for one of these, known for what it
+// is.
+const ID_TRADE_FLAGS = new Set([...CAMP_FLAGS, 'SW', 'G', 'ST']);
 // How far off a flag on the ground is worth a detour, as Roger's, and how
 // much nearer another must be to be gone for instead of the one chosen.
 const PICKUP_RANGE = 200;
@@ -806,7 +823,40 @@ const ROUTE_REPLAN_SECONDS = 3;
 const ROUTE_STRAY = 12;
 const ROUTE_DEST_SLACK = 8;
 const UNREACHABLE_SECONDS = 10;
+// A jump whose landing a foe can shoot, this far ahead on the route, is gone
+// round on the ground instead when that way is no more than
+// `SAFE_DETOUR_SHARE` as long plus `SAFE_DETOUR_EXTRA`.
+const JUMP_RISK_LOOKAHEAD = 60;
+const SAFE_DETOUR_SHARE = 1.5;
+const SAFE_DETOUR_EXTRA = 40;
+// A flag Ace has had to back off this many times within `STUCK_FLAG_RANGE`
+// of, each within `STUCK_FLAG_WINDOW` of the last, is behind or inside
+// something the route graph does not know about, and is left alone for
+// `STUCK_FLAG_SECONDS`.
+const STUCK_FLAG_STRIKES = 2;
+const STUCK_FLAG_RANGE = 30;
+const STUCK_FLAG_WINDOW = 20;
+const STUCK_FLAG_SECONDS = 60;
+// How far from a flight's planned landing a tank may come down, on its
+// level, and within how long of being in the air, for the flight to count as
+// flown.
+const LANDED_SLACK = 8;
+const LANDED_SECONDS = 0.5;
+// Where Ace puts his own flag down: within this share of his base's radius
+// of its middle, and no less than `HOME_DROP_MIN` across a small one.
+const HOME_DROP_SHARE = 0.15;
+const HOME_DROP_MIN = 4;
+// How near Ace waits to a foe's spawn zone with every foe dead: within a
+// shot, short of being in it.
+const SPAWN_WATCH_RANGE = 60;
+// A bad flag Ace knows of is looked for this many seconds of driving ahead,
+// and passed with this much room past the grab radius.
+const BAD_FLAG_LOOKAHEAD_SECONDS = 1;
+const BAD_FLAG_MARGIN = 1.5;
 const SELF_HIT_GRACE_SECONDS = 0.1;
+// How far past a foe's body a level shot's height may be and still be taken:
+// a tank on a gentle slope or a step's edge sits that little off level.
+const LEVEL_SHOT_SLACK = 0.1;
 
 // Roger with bzo's improvements. Each override is one of Roger's decisions
 // answered differently; everything else is Roger's.
@@ -836,7 +886,8 @@ export class Ace extends Roger {
     this.shedAirborne = false;
     this.dropDriveUntil = -Infinity;
     this.lastTrace = null;
-    this.extraReport = (stats) => `, routes ${stats.plans} (${stats.unreachable} none),`
+    this.extraReport = (stats) => `, routes ${stats.plans} (${stats.unreachable} none`
+      + `${stats.safer ? `, ${stats.safer} round a covered jump` : ''}),`
       + ` unsticks ${stats.unsticks}, held shots ${stats.held}, kept shots ${stats.kept}`;
     // The landing each airborne foe has been shot at for, as a clock time, so
     // one jump costs one shot.
@@ -857,8 +908,12 @@ export class Ace extends Roger {
     this.lastFiredAt = -Infinity;
     // When Ace last came out of a teleporter, and where he was last frame.
     this.lastTeleportAt = -Infinity;
-    // The flag on the ground being fetched.
+    // The flag on the ground being fetched; the flag any mode is driving to
+    // this frame, and the back-offs on the way to each, as a count and the
+    // time of the last.
     this.pickupIndex = null;
+    this.goalFlag = null;
+    this.flagStrikes = new Map();
     this.lastAt = null;
     this.teleportBackingOff = false;
     // Flags let go of on purpose -- Oscillation Overthruster before a way up
@@ -871,14 +926,11 @@ export class Ace extends Roger {
   think(view) {
     this.frameSeconds = this.lastThinkAt === null ? 0 : Math.max(0, view.now - this.lastThinkAt);
     this.lastThinkAt = view.now;
-    if (view.self.flag && Number.isInteger(view.self.flagIndex)) {
-      this.knownFlagTypes.set(view.self.flagIndex, view.self.flag);
-    }
-    for (const player of view.players) {
-      if (player.flag && Number.isInteger(player.flagIndex)) {
-        this.knownFlagTypes.set(player.flagIndex, player.flag);
-      }
-    }
+    this.goalFlag = null;
+    if (view.self.inAir) this.airborneAt = view.now;
+    this.flagZones = view.flagZones || null;
+    this.noteFlagTypes(view);
+    this.winning = this.isWinning(view);
     this.viewBases = view.bases;
     this.teamColor = view.self.teamColor;
     this.noteShooters(view);
@@ -974,16 +1026,72 @@ export class Ace extends Roger {
     return nodes.slice(this.route.at).some((node) => distance2D(node, p) < RETALIATE_RANGE);
   }
 
-  // The foe whose score is `LEADER_LEAD` clear of every other tank's, if any.
-  scoreLeader(ctx) {
+  // The foe whose score is `LEADER_LEAD` clear of every other tank's, if
+  // any, and by how much.
+  scoreLead(ctx) {
     const { view } = ctx;
     const scored = view.players.filter((p) => Number.isFinite(p.score));
     if (Number.isFinite(view.self.score)) scored.push(view.self);
     if (scored.length < 2) return null;
     scored.sort((a, b) => b.score - a.score);
     const [top, next] = scored;
-    if (top === view.self || !view.isFoe(top) || top.score - next.score < LEADER_LEAD) return null;
-    return top;
+    const lead = top.score - next.score;
+    if (top === view.self || !view.isFoe(top) || lead < LEADER_LEAD) return null;
+    return { top, lead };
+  }
+
+  scoreLeader(ctx) {
+    return this.scoreLead(ctx)?.top ?? null;
+  }
+
+  // The leader, when `DOMINANT_LEAD` clear and in the game.
+  dominantFoe(ctx) {
+    const lead = this.scoreLead(ctx);
+    if (!lead || lead.lead < DOMINANT_LEAD) return null;
+    const foe = this.remotePlayers(ctx.view).find((p) => p.id === lead.top.id);
+    return foe && foe.alive && !foe.paused ? foe : null;
+  }
+
+  // Ahead of every foe on score, and his team, where there are teams, ahead
+  // of every other team.
+  isWinning(view) {
+    if (!Number.isFinite(view.self.score)) return false;
+    const foes = view.players.filter((p) => Number.isFinite(p.score) && view.isFoe(p));
+    if (foes.length === 0 || foes.some((p) => p.score >= view.self.score)) return false;
+    const scores = view.teamScores || {};
+    const mine = scores[view.self.team];
+    return !Number.isFinite(mine)
+      || Object.entries(scores).every(([team, score]) => team === view.self.team || score < mine);
+  }
+
+  // Whether Ace's own score is `LOSING_MARGIN` under his foes' average.
+  isLosing(ctx) {
+    const { view } = ctx;
+    if (!Number.isFinite(view.self.score)) return false;
+    const foes = view.players.filter((p) => Number.isFinite(p.score) && view.isFoe(p));
+    if (foes.length === 0) return false;
+    const average = foes.reduce((sum, p) => sum + p.score, 0) / foes.length;
+    return view.self.score <= average - LOSING_MARGIN;
+  }
+
+  // A foe Ace could shoot now -- in sight, on his level -- within `range`.
+  foeInSight(ctx, range) {
+    const { view, me } = ctx;
+    return this.remotePlayers(view).some((p) => p.alive && !p.paused && view.isFoe(p)
+      && !(p.zoned && !me.zoned)
+      && Math.abs(p.z - me.z) < 2 * view.world.tankHeight
+      && distance2D(me, p) < range
+      && !this.isObscured(ctx, { x: me.x, y: me.y, z: me.z + 1 }, { x: p.x, y: p.y, z: p.z + 1 }));
+  }
+
+  // A superflag on the ground within `range` that Ace, empty-handed, would
+  // pick up.
+  flagWithin(ctx, range) {
+    const { view, me } = ctx;
+    if (me.flag) return false;
+    return view.flags.some((flag) => flag.onGround && flag.team === null && this.wantsGroundFlag(flag)
+      && !((this.unreachable.get(flag.index) ?? -Infinity) > view.now)
+      && distance2D(me, flag) < range);
   }
 
   // Whether Ace's team trails another team on score.
@@ -1005,13 +1113,15 @@ export class Ace extends Roger {
   targetWeight(ctx, p) {
     let weight = 1;
     if (this.isRetaliationTarget(ctx, p)) weight *= RETALIATE_WEIGHT;
-    if (p.id === ctx.leaderId) weight *= LEADER_WEIGHT;
+    if (p.id === ctx.leaderId) weight *= ctx.leaderLead >= DOMINANT_LEAD ? DOMINANT_WEIGHT : LEADER_WEIGHT;
     return weight;
   }
 
   findBestTarget(ctx, players) {
     if (this.isRabbit(ctx)) return this.rabbitTarget(ctx, players);
-    ctx.leaderId = this.scoreLeader(ctx)?.id ?? null;
+    const lead = this.scoreLead(ctx);
+    ctx.leaderId = lead?.top.id ?? null;
+    ctx.leaderLead = lead?.lead ?? 0;
     const target = super.findBestTarget(ctx, players);
     if (target) ctx.out.intent.reason = this.targetReason(ctx, target);
     return target;
@@ -1063,13 +1173,51 @@ export class Ace extends Roger {
     return super.isObscured(ctx, { ...from, z: from.z + lift }, { ...to, z: to.z + lift });
   }
 
+  // What each flag slot is, from every type the view shows: a flag carried,
+  // and one on the ground the view names -- Identify's answer, or what the
+  // player Ace flies for has learned. A slot keeps its type while the flag
+  // lies where it was last seen, or comes down after being seen carried; one
+  // that turns up anywhere else has gone and come back as something new.
+  noteFlagTypes(view) {
+    const carried = (index, type) => {
+      if (type && Number.isInteger(index)) this.knownFlagTypes.set(index, { type, at: null });
+    };
+    carried(view.self.flagIndex, view.self.flag);
+    for (const player of view.players) carried(player.flagIndex, player.flag);
+    for (const flag of view.flags) {
+      if (!flag.onGround || flag.team !== null) continue;
+      if (flag.type) {
+        this.knownFlagTypes.set(flag.index, { type: flag.type, at: pointOf(flag) });
+        continue;
+      }
+      const known = this.knownFlagTypes.get(flag.index);
+      if (!known) continue;
+      if (!known.at) known.at = pointOf(flag);
+      else if (distance2D(known.at, flag) > 1) this.knownFlagTypes.delete(flag.index);
+    }
+  }
+
+  // A flag's type as far as Ace can tell: named, remembered, or else the one
+  // type the zone it lies in spawns -- a `zoneflag` slot always comes back
+  // as its zone's type, so one lying there most likely is it.
+  knownType(flag) {
+    const known = flag.type ?? this.knownFlagTypes.get(flag.index)?.type ?? null;
+    if (known || !this.flagZones) return known;
+    const zone = this.flagZones.find((z) => z.flags.length === 1 && inZone(z, flag));
+    return zone ? zone.flags[0] : null;
+  }
+
   // A type this pilot has learned is one it can refuse. Holding a flag to camp
-  // with, he wants no other.
+  // with, he wants no other; holding Identify, only one worth trading it for.
   wantsGroundFlag(flag) {
     if (CAMP_FLAGS.has(this.heldFlag)) return false;
     if ((this.shedFlags.get(flag.index) ?? -Infinity) > this.lastThinkAt) return false;
-    const type = flag.type ?? this.knownFlagTypes.get(flag.index) ?? null;
+    const type = this.knownType(flag);
+    if (this.heldFlag === 'ID') return ID_TRADE_FLAGS.has(type);
     if (!type) return true;
+    // Identify is worth going for only with nothing better to do: ahead of
+    // every foe, and the team ahead of every other.
+    if (type === 'ID') return this.winning;
     if (isBadFlag(type) || HARD_FLAGS.has(type)) return false;
     return this.isFlagUseful(type);
   }
@@ -1138,7 +1286,7 @@ export class Ace extends Roger {
     const landsAt = view.now + landing.t;
     const plans = [];
     const atLanding = this.planLandingShot(ctx, p);
-    if (atLanding) plans.push({ ...atLanding, landsAt });
+    if (atLanding) plans.push({ ...atLanding, landsAt, level: true });
     const muzzleZ = me.z + me.muzzleHeight;
     const tall = view.world.tankHeight;
     const g = p.gravity;
@@ -1264,6 +1412,11 @@ export class Ace extends Roger {
   // him and his team. Shooting is a separate step and still happens. And a foe
   // in the air is met where it will land rather than chased where it is.
   chasePlayer(ctx) {
+    // A foe coming down on Ace's level within a shot's reach is a free kill,
+    // and comes before everything but a dodge: flags, captures and a team
+    // flag on its way home wait the second it takes.
+    const landing = ctx.me.canFire ? this.ambushTarget(ctx, { level: true }) : null;
+    if (landing) return this.ambush(ctx, landing);
     // Carrying a team flag, Ace stops only for a foe close enough to fight,
     // and otherwise takes it home.
     if (ctx.me.flagTeam !== null) {
@@ -1277,11 +1430,20 @@ export class Ace extends Roger {
       ctx.out.intent.reason = 'ours-carrier';
       return this.huntFar(ctx, carrier);
     }
+    // A foe running away with the game is hunted wherever he is.
+    const dominant = carrier ? null : this.dominantFoe(ctx);
+    if (dominant && distance2D(ctx.me, dominant) > ROGER_CHASE_RANGE) {
+      ctx.out.intent.reason = 'leader';
+      return this.huntFar(ctx, dominant);
+    }
+    const losing = this.isLosing(ctx);
     // Holding a flag to camp with and with nobody near, the camp comes first.
     if (!carrier && CAMP_FLAGS.has(ctx.me.flag) && this.campClear(ctx)) return false;
     // A capture to make wins over a chase, except a foe close enough to be a
-    // threat rather than a detour -- which he stands and fights.
-    if (!carrier && this.captureTarget(ctx)) {
+    // threat rather than a detour -- which he stands and fights. Losing, or
+    // with a foe running away with the game, the chase wins.
+    if (!carrier && !dominant && this.captureTarget(ctx)
+      && !(losing && this.foeInSight(ctx, LOSING_FIGHT_RANGE))) {
       const foe = this.closeFoe(ctx);
       return foe ? this.fightClose(ctx, foe) : false;
     }
@@ -1296,6 +1458,14 @@ export class Ace extends Roger {
       const quarry = this.rabbitQuarry(ctx);
       if (quarry) return this.huntFar(ctx, quarry);
       if (this.isRabbit(ctx)) return this.flee(ctx);
+      // Losing, Ace hunts the foe Roger chose and found too far, rather than
+      // going after flags.
+      const far = losing && !this.flagWithin(ctx, LOSING_FLAG_RANGE)
+        ? this.remotePlayers(ctx.view).find((p) => p.id === ctx.out.targetId) : null;
+      if (far && !far.airborne) {
+        ctx.out.intent.reason = 'losing';
+        return this.huntFar(ctx, far);
+      }
     }
     const target = ctx.view.players.find((p) => p.id === ctx.out.targetId);
     if (chased && target && !target.airborne) return this.chaseAround(ctx, target) || chased;
@@ -1464,8 +1634,10 @@ export class Ace extends Roger {
   // first, at any distance a shot carries: it is the surest kill there is.
   // Too late once he has turned to it is too late for good -- the shot is
   // faster than the tank, so driving closer loses more time than it saves --
-  // and a foe already shot at is left to that shot.
-  ambushTarget(ctx) {
+  // and a foe already shot at is left to that shot. `level` keeps to foes
+  // coming down on Ace's own level, a shot into where they land, rather
+  // than one met on the way past at another.
+  ambushTarget(ctx, { level = false } = {}) {
     const { view, me } = ctx;
     const top = me.topSpeed ?? view.world.tankSpeed;
     const full = { low: -0.5 * top, high: top, top };
@@ -1474,6 +1646,7 @@ export class Ace extends Roger {
       if (!p.airborne || !p.alive || p.paused || !view.isFoe(p)) continue;
       if (p.zoned && !me.zoned) continue;
       for (const plan of this.planShots(ctx, p)) {
+        if (level && !plan.level) continue;
         const shotAt = this.landingShots.get(p.id);
         if (shotAt !== undefined && Math.abs(shotAt - plan.landsAt) < 0.5) break;
         // Judged from when he will be facing it, since turning takes time too.
@@ -1713,14 +1886,19 @@ export class Ace extends Roger {
 
   fireAtGrounded(ctx) {
     const { view, me } = ctx;
-    // A tank with a landing shot already on its way is left to it. From the
-    // air a shot goes out level at the muzzle's height, so only a foe whose
-    // body that height is inside is worth one: Roger's two tank heights
-    // either way would put most of them over its head on the way down.
+    // A tank with a landing shot already on its way is left to it. A shot
+    // goes out level at the muzzle's height, so only a foe whose body that
+    // height is inside is worth one: Roger's two tank heights either way
+    // would put most of them over its head or under its tracks.
     // And from the air there is one pass through that height, so the shot goes
     // only when its line runs through the foe, not merely near the heading
     // Roger's trigger takes: a tenth of a radian is several units at range.
     const muzzle = me.z + (me.muzzleHeight ?? 1.57);
+    // On the ground too: Roger's two tank heights either way is a shot over
+    // or under a foe on a step or a slope -- a Super Bullet through the
+    // building between most of all. A Guided Missile climbs to its target and
+    // a Shock Wave is a sphere, so neither is held to its own height.
+    const levelShot = me.flag !== 'GM' && me.flag !== 'SW';
     // The line the shot itself takes: barrel plus the tank's own velocity.
     const base = view.world.shotSpeed;
     const sx = (me.vx ?? 0) + (base * Math.cos(me.azimuth));
@@ -1749,7 +1927,9 @@ export class Ace extends Roger {
       players: view.players.filter((p) => !p.airborne
         && !(view.now <= (this.landingShots.get(p.id) ?? -Infinity) + 0.5)
         && inRange(p)
-        && (!me.inAir || (muzzle >= p.z && muzzle <= p.z + view.world.tankHeight && onLine(p)))),
+        && (levelShot === false || (muzzle >= p.z - LEVEL_SHOT_SLACK
+          && muzzle <= p.z + view.world.tankHeight + LEVEL_SHOT_SLACK))
+        && (!me.inAir || onLine(p))),
     };
     super.fireAtTank({ ...ctx, view: grounded });
   }
@@ -1954,6 +2134,7 @@ export class Ace extends Roger {
     if (!target) return CAMP_FLAGS.has(ctx.me.flag) ? false : this.pickUpFlag(ctx);
     const { me, out } = ctx;
     out.intent.mode = target.returning ? 'return' : 'capture';
+    this.goalFlag = target.flag;
     out.intent.target = { ...target.pos, flag: target.flag.type ?? null };
     // One flag at a time: whatever is held goes when the team flag is in reach.
     if (target.dist < 10 && me.flag) out.dropFlag = true;
@@ -1981,15 +2162,16 @@ export class Ace extends Roger {
   // Roger looks only at his own level, and with nothing there drives straight
   // at a team flag anywhere -- at a raised base, that is a wall. Team flags
   // are `captureTarget`'s.
-  // Only empty-handed: a good flag in hand is kept rather than traded for the
-  // next one passed -- a bad one is shed on its own, and camping trades up
-  // for its own flags (`huntFlag`). The flag chosen stays chosen while it
+  // Only empty-handed, or holding Identify: a good flag in hand is kept rather
+  // than traded for the next one passed -- a bad one is shed on its own,
+  // camping trades up for its own flags (`huntFlag`), and Identify for what
+  // `wantsGroundFlag` allows. The flag chosen stays chosen while it
   // lies there, unless another is much nearer: a nearest-flag pick made
   // afresh each frame flips as the tank changes level, and a route up a lift
   // and back down again is the result.
   groundFlagTarget(ctx) {
     const { view, me } = ctx;
-    if (me.flag) return null;
+    if (me.flag && me.flag !== 'ID') return null;
     let best = null;
     let kept = null;
     for (const flag of view.flags) {
@@ -2016,6 +2198,7 @@ export class Ace extends Roger {
       return false;
     }
     if (me.flag && distance2D(me, pos) < 10) out.dropFlag = true;
+    this.goalFlag = flag;
     this.goTo(ctx, pos, 'flag');
     out.intent.target = { ...pos, flag: flag.type ?? null };
     return true;
@@ -2066,8 +2249,9 @@ export class Ace extends Roger {
     for (const flag of view.flags) {
       if (!flag.onGround || flag.team !== null) continue;
       if ((this.unreachable.get(flag.index) ?? -Infinity) > view.now) continue;
-      const type = flag.type ?? this.knownFlagTypes.get(flag.index) ?? null;
+      const type = this.knownType(flag);
       if (type !== null && !CAMP_FLAGS.has(type)) continue;
+      if (type === null && me.flag === 'ID') continue;
       const d = distance2D(me, flag);
       if (!best || d < best.d) best = { flag, d };
     }
@@ -2083,6 +2267,7 @@ export class Ace extends Roger {
     if (typeof ctx.view.findRoute === 'function' && !this.routeTo(ctx, pos)) {
       this.unreachable.set(flag.index, ctx.view.now + UNREACHABLE_SECONDS);
     }
+    this.goalFlag = flag;
     return this.goTo(ctx, pos, 'hunt-flag');
   }
 
@@ -2332,8 +2517,23 @@ export class Ace extends Roger {
     if (me.flagTeam !== null && typeof view.findRoute === 'function') {
       const base = view.myBase();
       const pos = { x: me.x, y: me.y, z: me.z };
-      const home = base && me.flagTeam === me.teamColor && this.isHome(pos, base);
-      if (base && !home) {
+      // His own flag goes down near the middle of his base, driven over at
+      // speed: not at the edge he came in by, where it would be the first
+      // thing an enemy reaches and where he would leave it again.
+      if (base && me.flagTeam === me.teamColor) {
+        const centre = pointOf(base);
+        const range = Math.max(HOME_DROP_MIN, (base.radius || 0) * HOME_DROP_SHARE);
+        if (this.isHome(pos, base) && distance2D(me, centre) <= range) {
+          ctx.out.intent.mode = 'home';
+          ctx.out.intent.target = centre;
+          ctx.out.rotation = normalizeAngle(azimuthTo(me, centre) - me.azimuth);
+          ctx.out.speed = 1;
+          ctx.out.dropFlag = true;
+          return true;
+        }
+        return this.goTo(ctx, centre, 'home');
+      }
+      if (base) {
         ctx.out.intent.mode = 'home';
         ctx.out.intent.target = pointOf(base);
         const route = this.routeTo(ctx, pointOf(base));
@@ -2351,8 +2551,31 @@ export class Ace extends Roger {
     if (me.flagTeam === null && !this.isRabbit(ctx)) {
       const foe = this.findBestTarget(ctx, this.remotePlayers(view));
       if (foe) return this.huntFar(ctx, foe);
+      if (this.watchSpawn(ctx)) return true;
     }
     return super.navigate(ctx);
+  }
+
+  // No foe to chase and one of them dead: where it comes back is a team
+  // spawn zone that is not Ace's, so he waits within a shot of the nearest
+  // one, facing it.
+  watchSpawn(ctx) {
+    const { view, me, out } = ctx;
+    if (!this.remotePlayers(view).some((p) => view.isFoe(p) && !p.alive)) return false;
+    let best = null;
+    for (const zone of view.spawnZones || []) {
+      if (zone.teams.includes(me.teamColor)) continue;
+      const d = distance2D(me, zone);
+      if (!best || d < best.d) best = { zone, d };
+    }
+    if (!best) return false;
+    const { zone } = best;
+    out.intent.mode = 'spawn-watch';
+    out.intent.target = pointOf(zone);
+    if (best.d > SPAWN_WATCH_RANGE) return this.goTo(ctx, zone, 'spawn-watch');
+    this.aimAt(ctx, azimuthTo(me, zone));
+    out.speed = 0;
+    return true;
   }
 
   // The route to `dest`, planned when the destination moves,
@@ -2377,11 +2600,45 @@ export class Ace extends Roger {
   }
 
   plan(view, here, there) {
-    const nodes = view.findRoute(here, there, { canJump: canTankJump(view.world, view.self.flag) });
+    const canJump = canTankJump(view.world, view.self.flag);
+    let nodes = view.findRoute(here, there, { canJump });
+    // A jump is a second or more Ace cannot steer, and comes down where it
+    // was always going to: one whose landing a foe has a level, clear shot
+    // at is taken only when the way round on the ground is much longer.
+    if (canJump && nodes && this.exposedJump(view, here, nodes)) {
+      const ground = view.findRoute(here, there, { canJump: false });
+      if (ground && routeLength(here, ground) <= (routeLength(here, nodes) * SAFE_DETOUR_SHARE) + SAFE_DETOUR_EXTRA) {
+        nodes = ground;
+        this.stats.safer++;
+      }
+    }
     this.stats.plans++;
     if (!nodes) this.stats.unreachable++;
     this.route = { dest: there, from: here, nodes, at: 0, plannedAt: view.now };
     return nodes ? this.route : null;
+  }
+
+  // The next jump on `nodes`, within `JUMP_RISK_LOOKAHEAD` of driving, if a
+  // live foe could shoot where it lands: within a shot's reach, on the
+  // landing's level, and in sight of it -- a Super Bullet sees through.
+  exposedJump(view, here, nodes) {
+    let travelled = 0;
+    let last = here;
+    for (const node of nodes) {
+      travelled += distance2D(last, node);
+      last = node;
+      if (travelled > JUMP_RISK_LOOKAHEAD) return false;
+      if (!node.jump) continue;
+      const reach = view.world.shotSpeed * (view.self.shotLifetime ?? 3.5);
+      const tall = view.world.tankHeight;
+      return view.players.some((p) => p.alive && !p.paused && view.isFoe(p)
+        && Math.abs(p.z - node.z) < tall
+        && distance2D(p, node) <= reach
+        && (p.flag === 'SB' || !view.isObscured(
+          { x: p.x, y: p.y, z: p.z + 1.5 }, { x: node.x, y: node.y, z: node.z + 1 },
+        )));
+    }
+    return false;
   }
 
   // Measured from the last node reached rather than the next, which across a
@@ -2413,6 +2670,14 @@ export class Ace extends Roger {
       if (Math.abs(node.z - here.z) > 1) break;
       const distance = Math.hypot(node.x - here.x, node.y - here.y);
       if (distance <= reached) {
+        route.at++;
+        continue;
+      }
+      // A flight just come down from, on its landing's level and near it, is
+      // flown: short of the planned spot by a few units is still landed, and
+      // taking it again from there is a second jump the route never had.
+      if ((node.jump || node.flight) && distance <= LANDED_SLACK
+        && ctx.view.now - (this.airborneAt ?? -Infinity) <= LANDED_SECONDS) {
         route.at++;
         continue;
       }
@@ -2638,9 +2903,28 @@ export class Ace extends Roger {
     this.unstickUntil = view.now + UNSTICK_BACKOFF_SECONDS;
     this.progress = null;
     this.stats.unsticks++;
+    this.strikeGoalFlag(view.now, me);
     out.speed = UNSTICK_SPEED;
     out.rotation = this.unstickTurn;
     out.intent.mode = 'unstick';
+  }
+
+  // A back-off on the way to a flag counts against it; enough of them close
+  // together and the flag is given up, as one no route reaches is.
+  strikeGoalFlag(now, me) {
+    const flag = this.goalFlag;
+    if (!flag || distance2D(me, flag) > STUCK_FLAG_RANGE) return;
+    const { index } = flag;
+    const last = this.flagStrikes.get(index);
+    const count = last && now - last.at <= STUCK_FLAG_WINDOW ? last.count + 1 : 1;
+    if (count < STUCK_FLAG_STRIKES) {
+      this.flagStrikes.set(index, { count, at: now });
+      return;
+    }
+    this.flagStrikes.delete(index);
+    this.unreachable.set(index, now + STUCK_FLAG_SECONDS);
+    if (this.pickupIndex === index) this.pickupIndex = null;
+    this.route = null;
   }
 
   // The nearest point to `here` on the legs ending at nodes `at` onward --
@@ -2791,7 +3075,41 @@ export class Ace extends Roger {
   // death-fall check, which still has the last word on the speed.
   avoidDeathFall(ctx) {
     this.dropOnTheMove(ctx);
+    this.avoidBadFlags(ctx);
     super.avoidDeathFall(ctx);
+  }
+
+  // An empty-handed tank takes any flag it drives over, so a bad one Ace
+  // knows -- one he or the player he flies for has seen carried, identified
+  // or named -- is steered round: lying on his level, ahead of him within a
+  // second's driving and close enough to his line to be taken, it turns him
+  // away from it. A dodge and an unstick come first.
+  avoidBadFlags(ctx) {
+    const { view, me, out } = ctx;
+    if (me.flag || me.inAir || out.intent.mode === 'dodge' || out.intent.mode === 'unstick') return;
+    const speed = out.speed * (me.topSpeed ?? view.world.tankSpeed);
+    if (Math.abs(speed) < 0.1) return;
+    const heading = speed < 0 ? me.azimuth + Math.PI : me.azimuth;
+    const dx = Math.cos(heading);
+    const dy = Math.sin(heading);
+    const room = getFlagGrabRadius() + BAD_FLAG_MARGIN;
+    const reach = (Math.abs(speed) * BAD_FLAG_LOOKAHEAD_SECONDS) + room;
+    let nearest = null;
+    for (const flag of view.flags) {
+      if (!flag.onGround || flag.team !== null) continue;
+      const type = this.knownType(flag);
+      if (!isBadFlag(type) || Math.abs(flag.z - me.z) > 1) continue;
+      const rx = flag.x - me.x;
+      const ry = flag.y - me.y;
+      const along = (rx * dx) + (ry * dy);
+      const across = (dx * ry) - (dy * rx);
+      if (along < -room || along > reach || Math.abs(across) >= room) continue;
+      if (!nearest || along < nearest.along) nearest = { along, across };
+    }
+    if (!nearest) return;
+    // Away from the side it lies on; dead ahead, whichever way he was turning.
+    const side = nearest.across !== 0 ? Math.sign(nearest.across) : -Math.sign(out.rotation || 1);
+    out.rotation = -side;
   }
 
   dropOnTheMove(ctx) {
@@ -3040,8 +3358,9 @@ export class Ace extends Roger {
   }
 
   dropHardFlags(ctx) {
-    super.dropHardFlags(ctx);
     const { me, out } = ctx;
+    // Roger has no use for Identify; Ace does.
+    if (me.flag !== 'ID') super.dropHardFlags(ctx);
     if (!this.shedOnTakeoff) return;
     if (me.flag !== 'OO' || (this.shedAirborne && !me.inAir)) {
       this.shedOnTakeoff = false;
@@ -3167,6 +3486,26 @@ export function findVantagePoints(obstacles, topOf, { minHeight = 3, minHalfSize
     .filter((spot) => spot.z >= minHeight)
     .sort((a, b) => b.z - a.z)
     .slice(0, limit);
+}
+
+// How far a route drives, from `here` along every node.
+function routeLength(here, nodes) {
+  let length = 0;
+  let last = here;
+  for (const node of nodes) {
+    length += distance2D(last, node);
+    last = node;
+  }
+  return length;
+}
+
+// Whether `pos` is inside a zone's footprint, at any height.
+function inZone(zone, pos) {
+  const dx = pos.x - zone.x;
+  const dy = pos.y - zone.y;
+  const cos = Math.cos(-zone.rotation);
+  const sin = Math.sin(-zone.rotation);
+  return Math.abs((dx * cos) - (dy * sin)) <= zone.halfWidth && Math.abs((dx * sin) + (dy * cos)) <= zone.halfDepth;
 }
 
 // Whether `pos` is over a base's footprint, at or above its top.

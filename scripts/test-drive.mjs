@@ -10,6 +10,7 @@
 // upstream's frame: +Z up, a heading an azimuth counter-clockwise from +X.
 
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { createDriveState, stepDrive } from '../public/drive.mjs';
 
 const CONFIG = {
@@ -55,6 +56,19 @@ function jumpFrom(support, config) {
 for (const support of [box, { ...pyramid, inverted: true }]) {
   const state = jumpFrom(support, CONFIG);
   assert.ok(state.jumpForwardSpeed > 0.9, `${support.type}${support.inverted ? ' (inverted)' : ''} keeps its speed`);
+}
+
+// A flat mesh face the tank's centre hangs over the edge of is still the
+// flat top it stands on: hix's diagonal bar, where a jump went straight up.
+{
+  const { parseBZWMap } = createRequire(import.meta.url)('../server/bzw-parse.cjs');
+  const hix = parseBZWMap(new URL('../maps/hix.bzw', import.meta.url).pathname, { quiet: true });
+  const bar = hix.obstacles.find((obs) => obs.name === 'ne:xbar');
+  const state = createDriveState({ x: 41.2, y: 35.3, z: 30, azimuth: 2.36 });
+  Object.assign(state, { onObstacle: true, onGround: false, inAir: false, lastObstacle: bar });
+  stepDrive(state, { forward: 1, rotation: 0, jumpTriggered: true }, { flag: null, motionFlag: null },
+    { config: CONFIG, colliders: [], topOf: () => 30 }, { now: 0, random: () => 0.5 }, 0.05);
+  assert.ok(state.jumpForwardSpeed > 0.9, `off the bar's edge at speed (${state.jumpForwardSpeed})`);
 }
 
 console.log('drive tests passed');

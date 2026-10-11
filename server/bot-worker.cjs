@@ -125,7 +125,10 @@ function buildView(bot, self, shared) {
     self: { ...self, ...own.self },
     players: shared.players.filter((player) => player.id !== bot.id),
     shots: shared.shots.filter((shot) => shot.ownerId !== bot.id),
-    flags: shared.flags,
+    // The one its Identify names comes with its type.
+    flags: own.identified
+      ? shared.flags.map((flag) => (flag.index === own.identified.index ? { ...flag, type: own.identified.type } : flag))
+      : shared.flags,
     teamScores: shared.teamScores || {},
     world: shared.world,
     isFoe: (player) => areFoes(player.team, own.self.team, shared.teamsAllowed),
@@ -137,6 +140,8 @@ function buildView(bot, self, shared) {
     bases: getBases(),
     vantages: getVantages(),
     safetyZones: world.safetyZones || [],
+    flagZones: world.flagZones || [],
+    spawnZones: world.spawnZones || [],
     ...getProbes(),
     findRoute: getRouter(),
     antidote: own.antidote,

@@ -6,6 +6,48 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+### Changed
+- The BZFlag port's TCP and UDP listen, and WebTransport (with `https` and
+  its packages) and WebRTC (with werift) are on, without a `server.json`
+  block asking: `"bzflag": false`, `"webtransport": false` and
+  `"webrtc": false` turn each off and stop offering it.
+- hix lets tanks jump.
+- Ace, the autopilot and server bots, plays to the score: a foe coming down
+  from a jump on his level within a shot's reach is shot first; a foe 10
+  clear of everyone is hunted ahead of captures; 3 under his foes' average,
+  he fights rather than captures or fetches flags.
+- A map's flag and team spawn zones reach browsers and bots beside its
+  safety zones. Ace takes an unnamed flag in a one-type zone for that type,
+  and with no foe left alive waits within a shot of a foe's spawn zone.
+- Ace's routes no longer drive or fly through a wall thinner than the route
+  grid (hix's diagonal walls), drive off the point of a turned base, or land
+  where a small miss falls off a corner; he goes round on the ground rather
+  than jump to a landing a foe has a clear level shot at, unless that is
+  much further; and he no longer fires a level shot at a foe whose body is
+  not at his muzzle's height, Super Bullet included.
+- `npm run bench:stuck` drives Ace between random spots on a map and lists
+  where he backed off, missed a jump or never arrived.
+- Ace takes his own flag to the middle of his base and puts it down there
+  on the move, rather than at the edge he came in by -- where he could also
+  stall, turning between home and not.
+- Ace counts a jump flown once he is down on its level a few units short of
+  the planned landing, instead of taking it a second time from there -- the
+  second jump that carried him past his base onto the pyramid under it.
+- A jump from a flat mesh top with the tank's centre over its edge keeps its
+  speed; it went straight up, as off a slope.
+- Ace gives up a flag he is held short of twice, and steers round a bad
+  flag he knows of rather than drive over it -- including one the player he
+  flies for has seen carried, identified or named.
+- Ace keeps Identify, remembers what it names, and trades it only for a
+  flag worth it (L, GM, SB, SW, G, ST); he goes out of his way for one only
+  while ahead on his own and his team's score. Server bots holding it learn
+  what it names, as a person's client does.
+
+### Fixed
+- Flags no longer spawn inside buildings on a map whose flags are 0 tall
+  (hix), and one dropped inside a building climbs onto it or, with no top
+  to stand on, leaves, as upstream.
+
 ## [1.3.40] - 2026-10-10
 
 ### Added

@@ -175,10 +175,15 @@ See [example-server.json](../example-server.json) for the supported shape.
 
 - **TCP:** the web app over HTTP, or HTTPS when `https` is set (HTTP/2
   where the browser offers it, HTTP/1.1 otherwise), its WebSockets, and
-  BZFlag clients with a `bzflag` block -- told apart by their opening bytes.
-- **UDP**, with a `bzflag` block: BZFlag's ping and movement link,
-  WebTransport (`"webtransport": true`) and WebRTC (`"webrtc": {}`), told
+  BZFlag clients -- told apart by their opening bytes.
+- **UDP:** BZFlag's ping and movement link, WebTransport and WebRTC, told
   apart by each datagram's first bytes.
+
+Each is on wherever it can be, and `false` turns one off and stops offering
+it to clients: `"bzflag": false` refuses BZFlag clients and their pings,
+`"webtransport": false` and `"webrtc": false` keep browsers off those paths.
+A `bzflag` block is only for its own settings -- the list, UPnP, the world
+cache.
 
 ```json
 "listen": "[::]:5154"
@@ -195,8 +200,8 @@ A player on the server's own network who uses its public name reaches it
 through the router's loop-back (NAT reflection): the router has to forward
 UDP that way as well as TCP, for every network it serves, a DMZ included.
 
-`"webtransport": true`, with `https` and a `bzflag` block, answers HTTP/3 on
-the BZFlag port's UDP, with the `https` certificate. Browsers reach it
+WebTransport answers HTTP/3 on the port's UDP, with the `https`
+certificate, so it is off without `https`. Browsers reach it
 directly, not through a reverse proxy, so the certificate has to name the
 host they use. A browser with WebTransport carries its UDP channel over it,
 before WebRTC ([network.md](network.md)), and `/wt-test.html` tests a
@@ -245,22 +250,23 @@ The TLS name has to be on the relay's certificate too.
 
 Moves and shots can ride UDP instead of the WebSocket, as upstream sends
 them, so a lost packet costs one message rather than holding back every one
-behind it. A browser tries WebTransport first (`"webtransport": true`,
-above), then a WebRTC data channel:
+behind it. A browser tries WebTransport first (above), then a WebRTC data
+channel; both are on by default, sharing the port's UDP, so nothing more is
+forwarded than that port. The `webrtc` block, optional, takes its STUN
+servers:
 
 ```json
-"webrtc": {}
+"webrtc": { "iceServers": ["stun:host:3478"] }
 ```
 
-Both share the BZFlag port's UDP, so a `bzflag` block is needed, and nothing
-more is forwarded than that port. WebRTC is IPv4 only: some carriers drop a
+ WebRTC is IPv4 only: some carriers drop a
 phone's data connection when WebRTC runs over its IPv6. No certificate is
 needed, and the reverse proxy is not involved. The server learns its public
-address from the `stun:` entries of `voiceIceServersIpv4`, or from
-`"iceServers": ["stun:host:3478"]` in the block. It runs on werift, an
-optional package. A player whose channel does not open plays on the
-WebSocket as before, and `/playerlist` shows `h3+`, `rtc+` or `turn+` for
-one whose channel did. [network.md](network.md) has the details.
+address from those STUN servers, or else the `stun:` entries of
+`voiceIceServersIpv4`. It runs on werift, an optional package. A player
+whose channel does not open plays on the WebSocket as before, and
+`/playerlist` shows `h3+`, `rtc+` or `turn+` for one whose channel did.
+[network.md](network.md) has the details.
 
 With `voiceTurnSecret`, each player also gets the IPv4 voice relays'
 `turn:...?transport=udp` for the channel, with its own credential: WebRTC

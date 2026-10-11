@@ -580,6 +580,8 @@ the server and a browser Worker both run.
 alongside 2.4, and what to suggest upstream so one port and one list entry
 can carry both.
 
+`docs/video-plan.md` is the plan for camera video beside voice (issue #188).
+
 `docs/bots-plan.md` is the plan for the autopilot and for bots (issue #151).
 `public/autopilot.mjs` reads the world only through a view, so the client's
 autopilot and the server's own bots (`server/bots.cjs`) drive the same
@@ -746,8 +748,8 @@ at the same one: `127.0.0.1` with Caddy's `reverse_proxy 127.0.0.1:5154`, or
 `::1` with `[::1]:5154`. `localhost` is resolved to `127.0.0.1` and says so,
 because a socket binds one family and the name promises two. A loopback bind
 also takes the BZFlag port's UDP off the network -- BZFlag, WebTransport and
-WebRTC all reach it directly, never through the proxy -- so a server with a
-`bzflag` block binds every interface.
+WebRTC all reach it directly, never through the proxy -- so a public server
+binds every interface.
 
 ### Assets are compressed once, not per request
 

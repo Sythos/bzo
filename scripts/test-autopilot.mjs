@@ -209,7 +209,7 @@ for (const flag of ['US', 'MG', 'ID']) {
 {
   const pilot = new Ace();
   pilot.think(makeView({ players: [enemy(500, -500, { alive: false, flag: 'B', flagIndex: 7 })] }));
-  assert.equal(pilot.knownFlagTypes.get(7), 'B');
+  assert.equal(pilot.knownFlagTypes.get(7).type, 'B');
   assert.equal(pilot.wantsGroundFlag({ index: 7, type: null }), false, 'a bad flag is not wanted');
 }
 
@@ -449,6 +449,151 @@ for (const flag of ['US', 'MG', 'ID']) {
   assert.equal(free.stats.unsticks, 0);
 }
 
+// A bad flag Ace knows of, lying in his way, is steered round: one the view
+// names, as the player's client does once it has seen it, and one he saw
+// carried himself. Holding a flag, there is nothing to avoid.
+{
+  const ahead = (extra) => ({ index: 5, team: null, onGround: true, x: 1, y: 12, z: 0, ...extra });
+  const drive = (pilot, flag, self = {}) => pilot.think(makeView({
+    self: { x: 0, y: 0, azimuth: Math.PI / 2, ...self }, flags: [flag], players: [enemy(0, 150)],
+  }));
+  const plain = drive(new Ace(), ahead({ type: null }));
+  assert.ok(plain.speed > 0 && Math.abs(plain.rotation) < 0.5, 'an unknown flag is driven over');
+  const named = drive(new Ace(), ahead({ type: 'B' }));
+  assert.ok(named.rotation > 0.5, `a known Blindness flag on the right is passed on the left (${named.rotation})`);
+  const pilot = new Ace();
+  pilot.knownFlagTypes.set(5, { type: 'RC', at: null });
+  assert.ok(drive(pilot, ahead({ type: null, x: -1 })).rotation < -0.5, 'one he saw carried, on the left, is passed on the right');
+  const holding = drive(new Ace(), ahead({ type: 'B' }), { flag: 'V', flagIndex: 9 });
+  assert.ok(Math.abs(holding.rotation) < 0.5, 'holding a flag, nothing is taken');
+  const behind = drive(new Ace(), ahead({ type: 'B', y: -20 }));
+  assert.ok(Math.abs(behind.rotation) < 0.5, 'nor is one behind him in the way');
+}
+
+// Identify is kept, and traded only for a flag worth it that it has named;
+// a type learnt is forgotten once the flag turns up somewhere new.
+{
+  const at = (index, extra) => ({ index, team: null, onGround: true, x: 0, y: 30, z: 0, type: null, ...extra });
+  const holding = (flags, pilot = new Ace()) => pilot.think(makeView({ self: { flag: 'ID', flagIndex: 9 }, flags }));
+  assert.equal(holding([]).dropFlag, false, 'Identify is not dropped');
+  assert.ok(!['flag', 'hunt-flag'].includes(holding([at(1)]).intent.mode), 'nor traded for a flag it cannot name');
+  const trade = holding([at(1, { type: 'SW' })]);
+  assert.equal(trade.intent.mode, 'flag', 'but traded for Shock Wave');
+  const pilot = new Ace();
+  holding([at(2, { type: 'B' })], pilot);
+  assert.equal(pilot.knownType(at(2)), 'B', 'what Identify named is remembered');
+  holding([at(2, { x: 200 })], pilot);
+  assert.equal(pilot.knownType(at(2)), null, 'until the flag is somewhere new');
+  const idFlag = at(3, { type: 'ID' });
+  const want = (score) => new Ace().think(makeView({ self: { score }, flags: [idFlag], players: [enemy(0, 600, { score: 2 })] }));
+  assert.notEqual(want(0).intent.mode, 'flag', 'Identify is no errand while behind');
+  assert.equal(want(5).intent.mode, 'flag', 'and one while ahead');
+}
+
+// A level shot leaves at the muzzle's height: a foe on a step above, or
+// below, is not shot at, Super Bullet or not; one on Ace's level is.
+{
+  const at = (z, flag = 'SB') => new Ace().think(makeView({
+    self: { flag, muzzleHeight: 1.57, shotSpeed: 100, shotLifetime: 3.5 }, players: [enemy(0, 80, { z })],
+  }));
+  assert.equal(at(0).fire, true, 'level');
+  assert.equal(at(3).fire, false, 'a step above');
+  assert.equal(at(-2).fire, false, 'a step below');
+  assert.equal(at(3, 'GM').fire, true, 'a Guided Missile climbs to it');
+}
+
+// A jump whose landing a foe covers is gone round on the ground, when that
+// is not much further; one nobody covers, or with no way round, is jumped.
+{
+  const jumping = [{ x: 0, y: 20, z: 0 }, { x: 0, y: 40, z: 15, jump: true }, { x: 0, y: 60, z: 15 }];
+  const round = [{ x: 40, y: 20, z: 0 }, { x: 40, y: 60, z: 15 }, { x: 0, y: 60, z: 15 }];
+  const route = (players, ground = round) => {
+    const pilot = new Ace();
+    pilot.plan(makeView({
+      players,
+      findRoute: (from, to, { canJump }) => (canJump ? jumping : ground),
+    }), { x: 0, y: 0, z: 0 }, { x: 0, y: 60, z: 15 });
+    return pilot.route.nodes;
+  };
+  assert.equal(route([]), jumping, 'nobody covering it, the jump');
+  assert.equal(route([enemy(0, 120, { z: 15 })]), round, 'a foe on the landing\'s level, round');
+  assert.equal(route([enemy(0, 120, { z: 0 })]), jumping, 'one on another level cannot shoot it');
+  assert.equal(route([enemy(0, 120, { z: 15 })], null), jumping, 'no way round, the jump');
+}
+
+// His own flag home: on the edge of his base he drives on to the middle
+// rather than put it down where he came in, and puts it down there.
+{
+  const base = { team: 0, x: 0, y: 340, z: 30, halfWidth: 35, halfDepth: 35, rotation: Math.PI / 4 };
+  const home = (x, y) => new Ace().think(makeView({
+    world: { teamFlags: true },
+    self: { team: 'red', teamColor: 0, flag: 'R*', flagIndex: 0, flagTeam: 0, x, y, z: 30, speed: 25 },
+    myBase: () => ({ x: 0, y: 340, z: 30, radius: 35 }),
+    bases: [base],
+    findRoute: (from, to) => [{ x: to.x, y: to.y, z: to.z }],
+  }));
+  const edge = home(17.8, 309.8);
+  assert.equal(edge.dropFlag, false, 'not at the edge');
+  assert.equal(edge.intent.mode, 'home');
+  assert.ok(edge.speed > 0, 'driving on in');
+  assert.equal(home(2, 338).dropFlag, true, 'in the middle, down it goes');
+}
+
+// Down from a jump a few units short of its planned landing, the jump is
+// flown: Ace goes on along the route rather than take it a second time.
+{
+  const nodes = [
+    { x: 0, y: 40, z: 15, jump: true, flight: { jump: true, speed: 1, dx: 0, dy: 1, launch: 0, air: 2.8 } },
+    { x: 0, y: 70, z: 15 },
+  ];
+  const flag = { index: 0, type: 'R*', team: 1, onGround: true, x: 0, y: 70, z: 15 };
+  const view = (now, self) => makeView({
+    now, world: { teamFlags: true }, flags: [flag], self: { teamColor: 2, ...self }, findRoute: () => nodes,
+  });
+  const pilot = new Ace();
+  pilot.think(view(100, { y: 30, z: 18, inAir: true }));
+  const landed = pilot.think(view(100.05, { y: 37, z: 15, inAir: false, azimuth: Math.PI / 2 }));
+  assert.equal(landed.jump, false, 'no second jump');
+  assert.equal(landed.intent.route?.[0]?.y, 70, 'on to the next node');
+}
+
+// Zones: a flag nobody has named, lying in a zone that spawns one type, is
+// taken for that type; and with no foe alive Ace waits by the nearest foe
+// spawn zone that is not his own team's.
+{
+  const zone = (x, y, extra) => ({ x, y, z: 0, halfWidth: 10, halfDepth: 10, rotation: 0, ...extra });
+  const pilot = new Ace();
+  pilot.think(makeView({ flagZones: [zone(0, 100, { flags: ['GM'] })] }));
+  assert.equal(pilot.knownType({ index: 1, x: 3, y: 104, type: null }), 'GM', 'in a GM zone, a GM');
+  assert.equal(pilot.knownType({ index: 2, x: 50, y: 104, type: null }), null, 'outside it, unknown');
+
+  const spawnZones = [zone(0, 300, { teams: [1] }), zone(0, -100, { teams: [0] })];
+  const dead = enemy(0, 300, { alive: false });
+  const far = new Ace().think(makeView({ spawnZones, players: [dead] }));
+  assert.equal(far.intent.mode, 'spawn-watch', `heads for the foe's spawn (${far.intent.mode})`);
+  assert.equal(far.intent.target.y, 300, 'not his own team\'s');
+  const near = new Ace().think(makeView({ spawnZones, players: [dead], self: { y: 260 } }));
+  assert.equal(near.speed, 0, 'and waits within a shot of it');
+  const alive = new Ace().think(makeView({ spawnZones, players: [enemy(0, 300)] }));
+  assert.notEqual(alive.intent.mode, 'spawn-watch', 'not while a foe is alive');
+}
+
+// A flag inside a building: the tank goes for it, is held short of it and
+// backs off, and on the second back-off gives that flag up.
+{
+  const ace = new Ace();
+  const flag = { index: 7, type: null, team: null, onGround: true, x: 0, y: 12, z: 0 };
+  const modes = [];
+  for (let i = 0; i < 150; i++) {
+    const out = ace.think(makeView({ now: 100 + (i / 30), self: { x: 0, y: 0, azimuth: Math.PI / 2 }, flags: [flag] }));
+    modes.push(out.intent.mode);
+  }
+  assert.equal(modes[0], 'flag');
+  assert.ok(ace.stats.unsticks >= 2, `backed off: ${[...new Set(modes)]}`);
+  assert.ok(ace.unreachable.get(7) > 104, 'and the flag is given up');
+  assert.notEqual(modes.at(-1), 'flag', 'for something else');
+}
+
 // Holding Oscillation Overthruster, a jump onto a building goes into it
 // rather than onto it, so Ace jumps and lets the flag go once he is off the
 // ground -- it falls back where he left, a level below where he lands.
@@ -505,6 +650,65 @@ for (const flag of ['US', 'MG', 'ID']) {
     if (out.fire) firedAt = t;
   }
   assert.ok(firedAt !== null && firedAt < apex, `fires on the way up (${firedAt?.toFixed(2)}s, apex ${apex.toFixed(2)}s)`);
+}
+
+// A foe jumping who will come down on Ace's level within a shot's reach is
+// lined up for ahead of a capture; one coming down on a platform above is
+// not.
+{
+  const redFlag = { index: 0, type: 'R*', team: 1, onGround: true, x: 300, y: 0, z: 0 };
+  const view = (landsOn) => makeView({
+    self: { teamColor: 2, muzzleHeight: 1.57, muzzleForward: 3, shotSpeed: 100, speed: 0, topSpeed: 25 },
+    world: { teamFlags: true, tankAngVel: Math.PI / 4, maxShots: 5 },
+    flags: [redFlag],
+    myBase: () => ({ x: -300, y: 0, z: 0, radius: 15 }),
+    firstHit: (from) => (landsOn > 0 && from.z > landsOn ? { ...from, z: landsOn } : null),
+    players: [enemy(0, 120, { z: 8, airborne: true, gravity: 9.8, vz: 5, vx: 0, vy: -10 })],
+  });
+  const level = new Ace().think(view(0));
+  assert.equal(level.intent.mode, 'ambush', `a landing on his level comes first (${level.intent.mode})`);
+  assert.equal(level.targetId, 'foe');
+  const above = new Ace().think(view(9));
+  assert.notEqual(above.intent.mode, 'ambush', 'a landing on a platform above does not');
+}
+
+// The score decides how much Ace fights. Losing, a foe in sight 100 away
+// turns him from a capture, and one past Roger's range is hunted rather than
+// a flag; a foe running away with the game is hunted from across the map.
+{
+  const redFlag = { index: 0, type: 'R*', team: 1, onGround: true, x: 300, y: 0, z: 0 };
+  const capture = (myScore) => new Ace().think(makeView({
+    self: { teamColor: 2, score: myScore },
+    world: { teamFlags: true },
+    flags: [redFlag],
+    myBase: () => ({ x: -300, y: 0, z: 0, radius: 15 }),
+    players: [enemy(0, 100, { score: 2 }), enemy(-300, 300, { id: 'other', score: 0 })],
+  }));
+  assert.equal(capture(0).intent.mode, 'capture', 'level on score, the capture');
+  const behind = capture(-5);
+  assert.notEqual(behind.intent.mode, 'capture', 'losing, the foe');
+  assert.equal(behind.targetId, 'foe');
+
+  const flag = { index: 4, type: null, team: null, onGround: true, x: -200, y: 0, z: 0 };
+  const far = (myScore) => new Ace().think(makeView({
+    self: { score: myScore }, flags: [flag], players: [enemy(0, 300, { score: 1 })],
+  }));
+  assert.ok(['flag', 'hunt-flag'].includes(far(0).intent.mode), 'level on score, a flag while the foe is far');
+  const hunting = far(-4);
+  assert.equal(hunting.intent.mode, 'hunt', `losing, the far foe (${hunting.intent.mode})`);
+  assert.equal(hunting.intent.reason, 'losing');
+
+  const runaway = (leaderScore) => new Ace().think(makeView({
+    self: { teamColor: 2, score: 8 },
+    world: { teamFlags: true },
+    flags: [redFlag],
+    myBase: () => ({ x: -300, y: 0, z: 0, radius: 15 }),
+    players: [enemy(0, 380, { score: leaderScore }), enemy(30, 30, { id: 'other', score: 1, alive: false })],
+  }));
+  assert.equal(runaway(14).intent.mode, 'capture', 'a leader not far ahead leaves the capture be');
+  const hunted = runaway(20);
+  assert.equal(hunted.intent.mode, 'hunt', 'a runaway leader is hunted, capture or no');
+  assert.equal(hunted.targetId, 'foe');
 }
 
 // Capture the flag: holding a good superflag, with a foe 100 away and the red
@@ -806,7 +1010,7 @@ for (const flag of ['US', 'MG', 'ID']) {
   const hunt = new Ace().think(makeView({ players: [far], flags: [unknown] }));
   assert.equal(hunt.intent.mode, 'hunt-flag', 'with nobody near, a flag that might be one is fetched');
   const knows = new Ace();
-  knows.knownFlagTypes.set(3, 'QT');
+  knows.knownFlagTypes.set(3, { type: 'QT', at: null });
   assert.equal(knows.think(makeView({ players: [far], flags: [unknown] })).intent.mode, 'hunt',
     'a flag known to be no use for camping is left');
 

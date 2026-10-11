@@ -259,6 +259,9 @@ function createBzflagServer({
   getStatus, getPingStatus = getStatus, getPlayers, getTeams, getGameSettings, getWorld, getCacheUrl = () => null, onEnter,
   reserveId, releaseId, rejectReason, log = () => {}, countIn = () => {}, countOut = () => {},
   onHttp = null, onTls = null, trustsProxyHeader = () => false,
+  // False keeps the port to the web app, WebTransport and WebRTC: BZFlag
+  // clients, and the ping that finds them, get no answer.
+  acceptBzflag = true,
 }) {
   const startedAt = Date.now();
   const connections = new Set();
@@ -499,6 +502,9 @@ function createBzflagServer({
         clearTimeout(timer);
         log(`[MUX] ${peerAddress(socket.remoteAddress)} asked for TLS; no https certificate configured`);
         socket.destroy();
+      } else if (!acceptBzflag) {
+        clearTimeout(timer);
+        socket.destroy();
       } else handOff((s) => { accept(s); s.resume(); });
     };
     socket.on('error', onError);
@@ -611,6 +617,7 @@ function createBzflagServer({
           udpRoutes[kind]?.(message, from);
           return;
         }
+        if (!acceptBzflag) return;
         if (message.readUInt16BE(2) === PING_REQUEST) {
           socket.send(packPingReply(getPingStatus(), port), from.port, from.address);
           return;

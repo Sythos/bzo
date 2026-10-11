@@ -9,6 +9,7 @@
 // what it jumps, and what it leaves alone.
 
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { buildNavGraph } from '../public/nav.mjs';
 
 const JUMP = { velocity: 19, gravity: 9.8, tankSpeed: 25 };
@@ -123,6 +124,39 @@ const box = (name, x, y, w, d, h, base = 0) => ({
   const under = (node) => node.x > -24 && node.x < 0 && Math.abs(node.y) < 20;
   assert.ok(takeoff && !under(takeoff),
     `the jump leaves from clear of the slab, not from (${takeoff?.x}, ${takeoff?.y}) under it`);
+}
+
+// hix's diagonal walls and turned bases. `ne:xwall` is a one-unit wall on
+// the line x = y, which a flight's columns once missed between their
+// centres; no route crosses it where it stands. And none drives off the
+// point of a turned base's corner.
+{
+  const { parseBZWMap } = createRequire(import.meta.url)('../server/bzw-parse.cjs');
+  const hix = parseBZWMap(new URL('../maps/hix.bzw', import.meta.url).pathname, { quiet: true });
+  const nav = buildNavGraph({
+    obstacles: hix.obstacles, mapSize: hix.mapSize, jump: { velocity: 19, gravity: 9.8, tankSpeed: 25 },
+  });
+  const trips = [
+    [{ x: 194, y: 190, z: 15 }, { x: -73, y: 224, z: 0 }],
+    [{ x: 254, y: 262, z: 15 }, { x: 177, y: -263, z: 0 }],
+    [{ x: 16, y: -352, z: 30 }, { x: 238, y: -47, z: 0 }],
+  ];
+  for (const [from, to] of trips) {
+    const route = nav.findRoute(from, to);
+    assert.ok(route, `a way from (${from.x},${from.y})`);
+    let last = from;
+    for (const node of route) {
+      const along = (last.x + last.y + node.x + node.y) / 4;
+      const crossed = Math.sign(last.x - last.y) !== Math.sign(node.x - node.y);
+      assert.ok(!(crossed && along > 75 && along < 285 && Math.min(last.z, node.z) >= 14),
+        `no crossing ne:xwall from (${last.x},${last.y},${last.z}) to (${node.x},${node.y},${node.z})`);
+      if (node.flight && !node.flight.jump) {
+        assert.ok(!(last.z === 30 && Math.abs(last.x) < 6 && Math.abs(Math.abs(last.y) - 292) < 8),
+          `no drive-off from a base's point at (${last.x},${last.y})`);
+      }
+      last = node;
+    }
+  }
 }
 
 console.log('nav tests passed');

@@ -12614,6 +12614,8 @@ function buildAutopilotView() {
       flagIndex: flag?.index ?? null,
       flagTeam: getFlagTeamIndex(flag?.type ?? null),
       zoned: isZoned(flag?.type ?? null, flag?.zoned === true),
+      // BZFlag's score: wins less losses.
+      score: (state.wins || 0) - (state.losses || 0),
     });
   }
   const shots = [];
@@ -12659,6 +12661,7 @@ function buildAutopilotView() {
       flagTeam: getFlagTeamIndex(myType),
       teamColor: myTeamColor,
       team: playerTeam,
+      score: (myTank?.userData?.playerState?.wins || 0) - (myTank?.userData?.playerState?.losses || 0),
       zoned: amZoned(),
       inAir: isInAir,
       muzzleForward: myMuzzle().forward,
@@ -12704,6 +12707,8 @@ function buildAutopilotView() {
       mapSize: Number.isFinite(currentWorldMapSize) ? currentWorldMapSize : DEFAULT_MAP_SIZE,
       shockOutRadius: getShotEffects('SW').shockOutRadius,
     },
+    // Each team's score, wins less losses, by team name.
+    teamScores: Object.fromEntries(teamScores.map((entry) => [entry.team, entry.wins - entry.losses])),
     isFoe: (player) => areFoes(player.team, playerTeam, teamsAllowed),
     myBase: () => {
       const base = OBSTACLES.find((obs) => obs.kind === 'base' && obs.team === myTeamColor);
@@ -12718,6 +12723,8 @@ function buildAutopilotView() {
     bases: teamBasesOf(OBSTACLES, getColliderTopY),
     vantages: autopilotVantages(),
     safetyZones: liveWorldData?.safetyZones || [],
+    flagZones: liveWorldData?.flagZones || [],
+    spawnZones: liveWorldData?.spawnZones || [],
     ...autopilotProbes,
     findRoute: autopilotRouter,
     // Where this client's bad flag can be shed, which the server tells only

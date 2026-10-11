@@ -27,6 +27,7 @@
     "test:bots": "node scripts/test-bots.mjs",
     "test:nav": "node scripts/test-nav.mjs",
     "bench:pilot": "node scripts/bench-pilot.mjs",
+    "bench:stuck": "node scripts/bench-stuck.mjs",
     "test:volume": "node scripts/test-volume.mjs",
     "test:voice-volume": "node scripts/test-voice-volume.mjs",
     "test:voice-channels": "node scripts/test-voice-channels.mjs",

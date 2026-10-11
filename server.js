@@ -559,6 +559,7 @@ const { Worker } = require('worker_threads');
 const {
   configureBzwParse,
   buildWorldFile,
+  clientZones,
   parseBZWServerOptions,
   parseBZWMap,
   formatInstancing,
@@ -4312,10 +4313,10 @@ const { host: LISTEN_HOST, port: PORT, note: listenNote } = resolveListenTarget(
   configPort: serverConfig.port,
 });
 
-// With a `bzflag` block, `listen` is a BZFlag port, TCP and UDP, that answers
-// the web app too, plain or over TLS (docs/port-mux-plan.md): it opens below,
-// with the BZFlag server, rather than here.
-const LISTEN_IS_BZFLAG = Boolean(serverConfig.bzflag && typeof serverConfig.bzflag === 'object');
+// `listen` is the one port, TCP and UDP, opened below with the BZFlag server
+// rather than here (docs/port-mux-plan.md): the web app plain or over TLS,
+// WebTransport and WebRTC, and BZFlag clients unless `"bzflag": false`.
+const LISTEN_IS_BZFLAG = serverConfig.bzflag !== false;
 const onHttpListening = () => {
   if (listenNote) log(`[LISTEN] ${listenNote}`);
   log(`Server running on ${describeListenTarget(LISTEN_HOST, PORT)}${LISTEN_IS_BZFLAG ? ' and BZFlag' : ''},`
@@ -4344,7 +4345,6 @@ const onHttpListening = () => {
   }
   serverReady.then(announceReadyServer);
 };
-if (!LISTEN_IS_BZFLAG) server.listen(PORT, LISTEN_HOST, onHttpListening);
 
 // One report for both lists once ready, after the proxied targets have been
 // dialled so it carries their rows.
@@ -5757,13 +5757,14 @@ const VOICE_ICE_SERVERS_IPV4 = parseVoiceIceServers(
 const UDP_CHANNEL_STUN = Array.isArray(serverConfig.webrtc?.iceServers)
   ? serverConfig.webrtc.iceServers.filter((url) => typeof url === 'string')
   : VOICE_ICE_SERVERS_IPV4.flatMap((server) => server.urls).filter((url) => /^stun:/i.test(url));
-const WEBRTC_ON = Boolean(serverConfig.webrtc && typeof serverConfig.webrtc === 'object');
+// On unless `"webrtc": false`, where werift is installed.
+const WEBRTC_ON = serverConfig.webrtc !== false;
 let UDP_CHANNELS = null;
 // A channel loses a move now and then, as UDP loses a MsgPlayerUpdate, and a
 // lost stop would leave a tank coasting on every screen until its next
 // update. Upstream's answer is an update at least once a second
 // (`MaxUpdateTime`, Player.cxx:38), so a resting tank is corrected within one.
-if (WEBRTC_ON || serverConfig.webtransport === true) {
+if (WEBRTC_ON || serverConfig.webtransport !== false) {
   GAME_CONFIG.MAX_UPDATE_INTERVAL = Math.min(GAME_CONFIG.MAX_UPDATE_INTERVAL, 1000);
 }
 
@@ -10137,6 +10138,7 @@ function checkCollision(x, y, z, tankRadius = 2, options = {}) {
   const obs = findTankObstacle(getCollisionColliders(), x, y, z, {
     azimuth: options.azimuth,
     radius: tankRadius,
+    height: options.height,
     slack: options.slack,
     tankScale: options.tankScale,
     phased: options.phased === true,
@@ -11176,6 +11178,9 @@ const UDP_CHANNEL_CHUNK_BYTES = 1000;
 // The radius the flag drop test uses for its clearance cylinder, and the step it
 // walks that cylinder in. DropGeometry uses the tank radius; bzo's is 2.
 const FLAG_DROP_TEST_RADIUS = 2;
+// Upstream's drop clearance radius is 0; the collision test sees nothing of
+// no width, so a drop is tested this thin instead.
+const FLAG_DROP_POINT_RADIUS = 0.05;
 // launchPosition sits on top of the tank, not at its feet. Upstream reads
 // tankHeight from BZDB; bzo's tanks are 2 units tall.
 const FLAG_LAUNCH_TANK_HEIGHT = 2;
@@ -11794,8 +11799,10 @@ function reportToListServer(reason) {
 // Native BZFlag clients (issue #174, docs/bzflag-clients.md): server.json's
 // `bzflag` block opens a bzfs-style port that answers queries and turns joins
 // away, and publishes it to the BZFlag list server with bzfs's own key.
+// The `bzflag` block's own settings -- list, UPnP, cache -- or none; BZFlag
+// clients are taken unless it is `false` (`LISTEN_IS_BZFLAG`).
 const BZFLAG_CONFIG = serverConfig.bzflag && typeof serverConfig.bzflag === 'object'
-  ? serverConfig.bzflag : null;
+  ? serverConfig.bzflag : {};
 // `let`: with `upnp` and no `publicAddr`, the gateway's external address
 // fills it in, as bzfs's `-UPnP` does (`UPnP::setRemoteInterface`).
 let bzflagPublicAddr = typeof BZFLAG_CONFIG?.publicAddr === 'string' ? BZFLAG_CONFIG.publicAddr.trim() : '';
@@ -11828,7 +11835,7 @@ function bzflagTeamIndex(team) {
 }
 
 let bzflagServer = null;
-if (BZFLAG_CONFIG) {
+{
   // A BZFlag client hears from every tank at least once a second
   // (`MaxUpdateTime`, Player.cxx:38) and dead-reckons from that; bzo's own
   // five-second heartbeat would leave a resting bzo tank stale on its screen.
@@ -11845,6 +11852,7 @@ if (BZFLAG_CONFIG) {
       + ` ${refusedProxyProtocolFrom.map((entry) => JSON.stringify(entry)).join(', ')}`);
   }
   bzflagServer = createBzflagServer({
+    acceptBzflag: LISTEN_IS_BZFLAG,
     trustsProxyHeader: (address) => addressMatchesWhitelist(address, proxyProtocolFrom),
     // The rest of what the port is asked: the web app, plain or over TLS.
     onHttp: (socket) => server.emit('connection', socket),
@@ -11896,21 +11904,22 @@ if (BZFLAG_CONFIG) {
   bzflagServer.listen(LISTEN_HOST, PORT)
     .then(() => {
       onHttpListening();
-      if (BZFLAG_CONFIG.upnp === true) startBzflagUpnp(PORT);
-      if (serverConfig.webtransport === true) startWebTransport();
+      if (LISTEN_IS_BZFLAG && BZFLAG_CONFIG.upnp === true) startBzflagUpnp(PORT);
+      if (serverConfig.webtransport !== false) startWebTransport();
       if (WEBRTC_ON) startUdpChannels();
     })
     .catch((error) => logError(`[BZFLAG] listen on ${describeListenTarget(LISTEN_HOST, PORT)} failed: ${error.message}`));
 }
 
-// `"webtransport": true`: HTTP/3 on the BZFlag port's UDP, with the `https`
-// certificate, which has to name the host a browser asks for -- QUIC does not
-// pass through the reverse proxy (server/webtransport.cjs, #189).
+// WebTransport, unless `"webtransport": false`: HTTP/3 on the port's UDP,
+// with the `https` certificate, which has to name the host a browser asks for
+// -- QUIC does not pass through the reverse proxy (server/webtransport.cjs,
+// #189). Off without `https` or the packages, saying so once.
 let webTransport = null;
 function startWebTransport() {
   const config = serverConfig.https;
   if (!config || typeof config !== 'object') {
-    log('[WT] webtransport needs https; off');
+    log('[WT] off: needs https');
     return;
   }
   const read = (file) => fs.readFileSync(path.resolve(path.dirname(CONFIG_PATH), String(file)), 'utf8');
@@ -11940,7 +11949,7 @@ function startWebTransport() {
 // channel until its next `init`. `listen` once named a port of its own; any
 // other value than `bzflag` is set aside, and said so.
 function startUdpChannels() {
-  const listen = serverConfig.webrtc.listen;
+  const listen = serverConfig.webrtc?.listen;
   if (listen !== undefined && listen !== 'bzflag') {
     log(`[RTC] webrtc.listen "${listen}" ignored: the UDP channel is on the BZFlag port`);
   }
@@ -12086,7 +12095,7 @@ function bzflagCacheUrl(world) {
 }
 
 app.get('/bzflag/world/:md5.bwc', (req, res) => {
-  if (!bzflagServer) {
+  if (!bzflagServer || !LISTEN_IS_BZFLAG) {
     res.status(404).end();
     return;
   }
@@ -12502,7 +12511,7 @@ function applyNativeDeath(victim, body, translator) {
 let bzflagListInFlight = false;
 let bzflagListQueued = null;
 function publishToBzflagListServer(reason) {
-  if (!bzflagServer || !bzflagPublicAddr || !BZFLAG_PUBLIC_KEY) return;
+  if (!bzflagServer || !LISTEN_IS_BZFLAG || !bzflagPublicAddr || !BZFLAG_PUBLIC_KEY) return;
   if (bzflagListInFlight && reason !== 'shutdown') {
     bzflagListQueued = reason;
     return;
@@ -12549,10 +12558,17 @@ setInterval(() => {
 //
 // Only spawning uses this. A drop goes through dropTeamFlag, whose radius is 0
 // and which upstream's own comment calls "not a real clearance check".
-function hasFlagClearance(x, y, z) {
-  for (let offset = 0; offset < FLAG_HEIGHT; offset += FLAG_DROP_TEST_RADIUS) {
-    if (checkCollision(x, y, z + offset, FLAG_DROP_TEST_RADIUS, { suppressLog: true })) return false;
-  }
+// The flag's own spot is always tested: a map may make flags 0 tall (hix
+// does), and upstream's cylinder of no height still finds a building it
+// stands in. Each step is a test as tall as the spawn radius, whatever the
+// radius, so a drop's thin one still reaches into what it stands in.
+function hasFlagClearance(x, y, z, radius = FLAG_DROP_TEST_RADIUS) {
+  let offset = 0;
+  do {
+    const options = { suppressLog: true, height: FLAG_DROP_TEST_RADIUS };
+    if (checkCollision(x, y, z + offset, radius, options)) return false;
+    offset += FLAG_DROP_TEST_RADIUS;
+  } while (offset < FLAG_HEIGHT);
   return true;
 }
 
@@ -12838,6 +12854,22 @@ function findFlagLandingZ(x, y, fromZ) {
   }
   return found ? landingZ : null;
 
+}
+
+// dropIt's other branch: a flag let go of inside a building -- by a Phantom
+// Zoned tank, or one that came down on a pyramid -- climbs to the lowest flat
+// top above it with room on it, and has nowhere to land when there is none.
+// The radius is a drop's, `FLAG_DROP_POINT_RADIUS`.
+function findFlagClimbZ(x, y, fromZ) {
+  const tops = [];
+  for (const obs of getCollisionColliders()) {
+    if (obs.collisionKind === 'boundary' || obs.kind === 'teleporter') continue;
+    const top = getColliderTopY(obs);
+    if (top < fromZ || !isOverFlatTop(obs, x, y)) continue;
+    tops.push(top);
+  }
+  tops.sort((a, b) => a - b);
+  return tops.find((top) => hasFlagClearance(x, y, top, FLAG_DROP_POINT_RADIUS)) ?? null;
 }
 
 // isOpposingTeam(). A team flag may not come to rest on another team's base:
@@ -13188,12 +13220,16 @@ function dropFlag(flag, now = Date.now()) {
   // from the flag's launch altitude: dropIt gets `dropPos` while
   // FlagInfo::dropFlag adds the tank height to the launch point separately.
   //
-  // `landingY` is `null` for open water: nothing above the waterline under
-  // this point at all (`findFlagLandingZ`). `landing.y` itself always gets a
+  // `landingY` is `null` for open water -- nothing above the waterline under
+  // this point at all (`findFlagLandingZ`) -- and for a building it cannot
+  // climb out of (`findFlagClimbZ`). `landing.y` itself always gets a
   // real number regardless -- upstream's own `dropIt` leaves `pos[2]` at
   // `minZ` in that same case (`if (pos[2] < minZ) pos[2] = minZ`), it just
   // also returns `false`, which is the signal both branches below act on.
-  const landingY = findFlagLandingZ(launch.x, launch.y, from.z);
+  let landingY = findFlagLandingZ(launch.x, launch.y, from.z);
+  if (landingY !== null && !hasFlagClearance(launch.x, launch.y, landingY, FLAG_DROP_POINT_RADIUS)) {
+    landingY = findFlagClimbZ(launch.x, launch.y, from.z);
+  }
   let landing = {
     x: launch.x,
     y: launch.y,
@@ -19449,12 +19485,8 @@ function startBotWorker() {
       wallHeight: GAME_CONFIG.WALL_HEIGHT,
       waterLevel: mapWaterLevel && mapWaterLevel.height > 0 ? mapWaterLevel.height : null,
       teleporterLinks: TELEPORTER_GRAPH.links,
-      // What a client's world carries of the zones: the safety ones, as
-      // `buildWorldFile` writes them.
-      safetyZones: MAP_ZONES.filter((zone) => zone.safety.size > 0).map((zone) => ({
-        x: zone.x, y: zone.y, z: zone.z, halfWidth: zone.halfWidth, halfDepth: zone.halfDepth,
-        rotation: zone.rotation, teams: [...zone.safety],
-      })),
+      // The zones a client's world carries, as `buildWorldFile` writes them.
+      ...clientZones(MAP_ZONES),
     },
   });
   log('[BOT] worker started');
@@ -19582,6 +19614,9 @@ function botOwnView(bot, now) {
     // Agility gives it the burst, Wings flies it.
     flag: myFlag ? { type: myType, zoned: myFlag.zoned === true } : null,
     antidote: me.antidote ? { x: me.antidote.x, y: me.antidote.y, z: me.antidote.z } : null,
+    // What Identify names, as `searchFlag` tells a person carrying it: the
+    // nearest flag on the ground in range, to this bot alone.
+    identified: botIdentifiedFlag(me, myType),
 
     self: {
       id: me.id,
@@ -19599,6 +19634,12 @@ function botOwnView(bot, now) {
       freeShots: countFreeShotSlots(me.shotSlotFreeAt, maxShots, now),
     },
   };
+}
+
+function botIdentifiedFlag(me, myType) {
+  if (myType !== 'ID' || !me.alive || me.paused) return null;
+  const closest = findNearestGroundFlag(flags, me.x, me.y, me.z, getFlagTuning().identifyRange);
+  return closest ? { index: closest.index, type: closest.type } : null;
 }
 
 // The bot a watcher follows, whose whole plan comes back with the tick.

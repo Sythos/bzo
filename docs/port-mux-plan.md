@@ -32,8 +32,8 @@ classification.
 
 `https: { cert, key }` in `server.json` -- PEM files, beside it or absolute --
 serves the app over TLS on the BZFlag port. A headset needs it for WebXR.
-With a `bzflag` block, `listen` is the BZFlag port, so one TCP port carries
-everything; a reverse proxy points at it.
+`listen` is the BZFlag port, so one TCP port carries everything; a reverse
+proxy points at it.
 
 HTTP/2 where the browser offers it: with `https`, the BZFlag port's TLS is
 Node's `http2.createSecureServer` with `allowHTTP1`, so a page's many
@@ -146,8 +146,9 @@ fraction of that 2%. Each stack already takes the cheap one where it can:
   `server/bzflag-server.cjs`, tested in `scripts/test-port-mux.mjs`): BZFlag's
   to its handler, the rest to whatever `routeUdp` names for STUN, DTLS or
   QUIC.
-- `"webtransport": true` puts HTTP/3 on that socket
-  (`server/webtransport.cjs`) with the `https` certificate, answering
+- WebTransport (on with `https`, `"webtransport": false` to stop it) puts
+  HTTP/3 on that socket (`server/webtransport.cjs`) with the `https`
+  certificate, answering
   `/wt-test` only: `public/wt-test.html` echoes datagrams at 30 a second and
   one stream. On the Let's Encrypt certificate, the page through the reverse
   proxy and WebTransport straight to 5154, over IPv6 on the LAN:
@@ -207,7 +208,8 @@ fraction of that 2%. Each stack already takes the cheap one where it can:
   split to 1000 bytes for Chrome's 1024-byte datagrams. `[WT]` logs each
   player that takes it.
 
-- WebRTC on the BZFlag port: `"webrtc": {}` runs the UDP channel's WebRTC
+- WebRTC on the BZFlag port (on unless `"webrtc": false`) runs the UDP
+  channel's WebRTC
   on werift over the port's socket (`server/udp-channel.cjs`), STUN and DTLS
   routed by ICE username then by address, its public IPv4 learnt once by
   STUN. libdatachannel's own port (`webrtc.listen`, 5153) and node-datachannel
