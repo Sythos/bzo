@@ -19,12 +19,8 @@ rabbit if it was the rabbit, and its flag dropped where it was last seen. Its
 record carries `notResponding`, so browsers draw upstream's `[nr]` beside the
 name (`ScoreboardRenderer.cxx:802`) and say "<player> not responding", then
 "<player> okay" on its next move (`playing.cxx:7323-7329`). It is not a lock
-target meanwhile (`playing.cxx:4426`).
+target meanwhile (`playing.cxx:4426`), and its radar blip, like a paused
+tank's, is its colour at 40% (`RadarRenderer.cxx:115`).
 
 Native BZFlag clients judge it for themselves, from the updates bzo relays,
 against the same `_notRespondingTime`.
-
-## Still to do
-
-- **Radar.** Upstream dims a not-responding tank's blip to 40%, as it does a
-  paused one (`RadarRenderer.cxx:114`). bzo's radar dims neither yet.

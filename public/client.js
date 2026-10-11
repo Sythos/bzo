@@ -13394,7 +13394,7 @@ function handleMotion(deltaTime) {
     // sends (start, land, an air-velocity change) only cover an ordinary jump
     // -- one that's over in a couple of seconds. A tank that cannot progress
     // its own arc at all (a collision livelock: see
-    // docs/hung-player-plan.md) otherwise has nothing left to report, ever.
+    // docs/not-responding.md) otherwise has nothing left to report, ever.
     // Costs nothing on an ordinary jump, which never runs long
     // enough to reach it, and is the one thing that still fires when a jump
     // that should have taken two seconds is still going after five.
@@ -16393,6 +16393,19 @@ const RADAR_HUNT_RING_COLOR = colorToCSS(HUNT_MARKER_COLOR);
 // panel goes through `getFlagRadarStyle`'s cache for the same reason: the radar
 // is redrawn every frame on a client with one core to spend.
 const ANTIDOTE_FLAG_STYLE = colorToCSS(ANTIDOTE_FLAG_COLOR);
+// A `#rrggbb` style scaled toward black, cut once per colour for the same reason.
+const dimmedRadarStyles = new Map();
+function dimRadarColor(style, factor) {
+  const key = `${style}|${factor}`;
+  let dimmed = dimmedRadarStyles.get(key);
+  if (dimmed === undefined) {
+    const rgb = /^#[0-9a-f]{6}$/i.test(style) ? parseInt(style.slice(1), 16) : 0x888888;
+    const scale = (shift) => Math.round(((rgb >> shift) & 0xff) * factor) << shift;
+    dimmed = colorToCSS(scale(16) | scale(8) | scale(0));
+    dimmedRadarStyles.set(key, dimmed);
+  }
+  return dimmed;
+}
 const RADAR_MARKER_RING_RADIUS = 9;
 const RADAR_MARKER_RING_WIDTH = 1.5;
 // Clear air between a ringed cross and its ring, for the zoom levels where the
@@ -17153,6 +17166,11 @@ function updateRadar() {
     // tank's.
     if (isTheRabbit(playerId) && !isColorblind()) {
       playerColor = colorToCSS(getPlayerTeamRadarColor(PLAYER_TEAM.RABBIT));
+    }
+    // RadarRenderer.cxx:115: a paused or not-responding tank's blip is its
+    // colour at 40%, darker rather than more transparent.
+    if (!isSelf && state && (state.paused || state.notResponding)) {
+      playerColor = dimRadarColor(playerColor, 0.4);
     }
 
     const tankAt = tank.position;
