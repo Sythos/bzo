@@ -2009,6 +2009,9 @@ end
 material
   name seethrough
   addtexture http://images.bzflag.org/gbratley/Spazzy%20McGee_fence-barbs.png
+  # Clear pixels dropped, not blended: a client with blending off still
+  # sees through, and nothing behind the grid is hidden by its clear parts.
+  alphathresh 0.05
 end
 
 define support
