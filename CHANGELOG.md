@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and versions use SemVer tags like v1.0.
 
 ## [Unreleased]
 
+## [1.3.41] - 2026-10-11
+
 ### Changed
 - The BZFlag port's TCP and UDP listen, and WebTransport (with `https` and
   its packages) and WebRTC (with werift) are on, without a `server.json`
